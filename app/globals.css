@@ -1,26 +1,451 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* The theme is a data attribute rather than a class: React owns <html className>
+   for the font variable and would reset any class added before hydration. */
+@custom-variant dark (&:is([data-theme="dark"] *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-heading: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-ink: var(--success-ink);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-ink: var(--warning-ink);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-ink: var(--danger-ink);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-deep: var(--primary-deep);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  /* Freedemy accent: one blue-violet (indigo) hue, deliberately bluer than
+     Udemy's purple so the product does not read as a clone. Everything the
+     interface colours lives here — change --primary / --primary-deep and the
+     hero glow, grid tint, focus rings and charts follow. Neutral surfaces keep
+     a few degrees of the same hue so nothing sits on flat grey. */
+  --radius: 0.75rem;
+
+  color-scheme: light;
+  --background: oklch(0.981 0.012 274);
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #4338ca;
+  --primary-foreground: #ffffff;
+  /* Deeper shade used as the hover fill on primary buttons. */
+  --primary-deep: #312e81;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #1e293b;
+  --muted: #f1f5f9;
+  --muted-foreground: #475569;
+  --accent: #e0e7ff;
+  --accent-foreground: #3730a3;
+  --destructive: oklch(0.55 0.19 27.5);
+  --border: #cbd5e1;
+  --input: #cbd5e1;
+  --ring: #2753ff;
+
+  /* Chart ramp matching WebThreads blue #2753ff and purple #7c3aed */
+  --chart-1: #2753ff;
+  --chart-2: #7c3aed;
+  --chart-3: #9333ea;
+  --chart-4: #38bdf8;
+  --chart-5: #6366f1;
+
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0.24 0.02 274);
+  --sidebar-primary: oklch(0.54 0.21 268);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.947 0.03 268);
+  --sidebar-accent-foreground: oklch(0.46 0.2 268);
+  --sidebar-border: oklch(0.915 0.024 274);
+  --sidebar-ring: oklch(0.54 0.21 268);
+
+  /* Feedback colours. warning is a fill only — it fails contrast as text,
+     so anything written on it uses warning-ink. */
+  --success: oklch(0.54 0.109 163.8);
+  --success-soft: oklch(0.962 0.03 165);
+  --success-ink: oklch(0.4 0.088 166);
+  --warning: oklch(0.813 0.165 75);
+  --warning-soft: oklch(0.972 0.05 85);
+  --warning-ink: oklch(0.44 0.1 65);
+  --danger: oklch(0.55 0.19 27.5);
+  --danger-soft: oklch(0.964 0.026 25);
+  --danger-ink: oklch(0.46 0.17 27);
+}
+
+[data-theme="dark"] {
+  /* Dark mode keeps the accent as the only saturated surface; everything else
+     is a near-neutral charcoal with a few degrees of the same hue so it never
+     reads as flat black. */
+  color-scheme: dark;
+  --background: #080812;
+  --foreground: #f8fafc;
+  --card: #0f0e21;
+  --card-foreground: #f8fafc;
+  --popover: #0f0e21;
+  --popover-foreground: #f8fafc;
+  --primary: #7c3aed;
+  --primary-foreground: #ffffff;
+  --primary-deep: #6d28d9;
+  --secondary: #171630;
+  --secondary-foreground: #c4b5fd;
+  --muted: #15142b;
+  --muted-foreground: #94a3b8;
+  --accent: #1e1b3d;
+  --accent-foreground: #a78bfa;
+  --destructive: oklch(0.66 0.17 27);
+  --border: rgba(124, 58, 237, 0.2);
+  --input: rgba(39, 83, 255, 0.22);
+  --ring: #7c3aed;
+
+  --chart-1: #2753ff;
+  --chart-2: #7c3aed;
+  --chart-3: #a855f7;
+  --chart-4: #38bdf8;
+  --chart-5: #6366f1;
+
+  --sidebar: oklch(0.226 0.024 274);
+  --sidebar-foreground: oklch(0.96 0.012 274);
+  --sidebar-primary: oklch(0.76 0.15 268);
+  --sidebar-primary-foreground: oklch(0.2 0.06 268);
+  --sidebar-accent: oklch(0.31 0.045 268);
+  --sidebar-accent-foreground: oklch(0.9 0.06 268);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.76 0.15 268);
+
+  --success: oklch(0.72 0.1 165);
+  --success-soft: oklch(0.3 0.045 165);
+  --success-ink: oklch(0.87 0.07 165);
+  --warning: oklch(0.83 0.14 80);
+  --warning-soft: oklch(0.33 0.05 78);
+  --warning-ink: oklch(0.89 0.08 84);
+  --danger: oklch(0.68 0.16 27);
+  --danger-soft: oklch(0.31 0.05 27);
+  --danger-ink: oklch(0.88 0.07 27);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  html {
+    @apply font-sans;
+    scroll-behavior: smooth;
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--primary) 18%, transparent);
+  }
+  /* One focus treatment across the app, keyboard-only. */
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  /* Primary CTA: a deeper violet slides up from the bottom to fill the button. */
+  .btn-fill {
+    background-image: linear-gradient(to top, var(--primary-deep) 50%, var(--primary) 50%);
+    background-size: 100% 200%;
+    background-position: 0% 0%;
+    transition:
+      background-position 300ms ease,
+      transform 300ms ease,
+      box-shadow 300ms ease;
+  }
+  .btn-fill:hover {
+    background-position: 0% 100%;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px -8px color-mix(in oklch, var(--primary) 60%, transparent);
+  }
+  .btn-fill:active {
+    transform: translateY(0);
+  }
+
+  /* Secondary CTA: outline until hovered, then it fills solid. */
+  .btn-outline-fill {
+    transition:
+      background-color 300ms ease,
+      border-color 300ms ease,
+      color 300ms ease,
+      box-shadow 300ms ease;
+  }
+  .btn-outline-fill:hover {
+    background-color: var(--primary);
+    border-color: var(--primary);
+    color: var(--primary-foreground);
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  }
+}
+
+@layer utilities {
+  /* Tailwind: hide scrollbars on the horizontally scrolling tab strip. */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .animate-rise {
+    animation: rise 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .animate-fade {
+    animation: fade 0.25s ease-out both;
+  }
+  .animate-pop {
+    animation: pop 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  /* Soft grid used behind the home hero: tinted with the accent, densest at the
+     headline and faded out toward every edge so the page has depth without
+     reading as graph paper. */
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, color-mix(in oklch, var(--primary) 14%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklch, var(--primary) 14%, transparent) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: radial-gradient(
+      ellipse 64% 58% at 50% 26%,
+      black 18%,
+      color-mix(in oklch, black 52%, transparent) 58%,
+      transparent 88%
+    );
+  }
+
+  /* The accent bloom behind the headline and input with WebThreads blue-purple hues */
+  .hero-glow {
+    background:
+      radial-gradient(
+        55% 45% at 50% 25%,
+        rgba(124, 58, 237, 0.22) 0%,
+        rgba(39, 83, 255, 0.12) 45%,
+        transparent 75%
+      ),
+      radial-gradient(
+        70% 60% at 50% 5%,
+        rgba(39, 83, 255, 0.16) 0%,
+        transparent 80%
+      );
+  }
+
+  /* Website-wide rich gradient background matching WebThreads */
+  .bg-ambient-gradient {
+    background-color: var(--background);
+    background-image:
+      radial-gradient(ellipse 80% 60% at 50% -10%, rgba(124, 58, 237, 0.16) 0%, transparent 70%),
+      radial-gradient(ellipse 60% 50% at 95% 30%, rgba(39, 83, 255, 0.14) 0%, transparent 60%),
+      radial-gradient(ellipse 55% 45% at 5% 70%, rgba(124, 58, 237, 0.12) 0%, transparent 60%),
+      radial-gradient(ellipse 70% 50% at 50% 100%, rgba(39, 83, 255, 0.12) 0%, transparent 65%),
+      linear-gradient(180deg, #f8faff 0%, #f1f4ff 30%, #ecebff 65%, #f4f3ff 100%);
+    background-attachment: fixed;
+  }
+
+  [data-theme="dark"] .bg-ambient-gradient {
+    background-color: var(--background);
+    background-image:
+      radial-gradient(ellipse 90% 65% at 50% -10%, rgba(124, 58, 237, 0.22) 0%, transparent 65%),
+      radial-gradient(ellipse 70% 50% at 95% 35%, rgba(39, 83, 255, 0.2) 0%, transparent 65%),
+      radial-gradient(ellipse 65% 55% at 5% 70%, rgba(124, 58, 237, 0.18) 0%, transparent 70%),
+      radial-gradient(ellipse 80% 55% at 50% 100%, rgba(39, 83, 255, 0.16) 0%, transparent 65%),
+      linear-gradient(180deg, #080814 0%, #0c0b20 25%, #100f2a 50%, #0d0c22 80%, #070712 100%);
+    background-attachment: fixed;
+  }
+
+  /* Signature gradient text matching the WebThreads #2753ff and #7c3aed palette.
+     Light mode uses deeper stops so both ends clear 3:1 against the hero. */
+  .text-gradient-logo {
+    background: linear-gradient(135deg, #2753ff 0%, #4338ca 35%, #7c3aed 70%, #9333ea 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  [data-theme="dark"] .text-gradient-logo {
+    background: linear-gradient(135deg, #60a5fa 0%, #2753ff 35%, #7c3aed 70%, #c084fc 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  /* WebThreads wireframe glow effect */
+  .webthreads-wire-glow {
+    box-shadow:
+      0 0 15px -3px rgba(39, 83, 255, 0.4),
+      0 0 30px -6px rgba(124, 58, 237, 0.3);
+  }
+
+  /* Luminous WebThreads gradient border highlight for cards */
+  .gradient-border-card {
+    position: relative;
+    border-radius: calc(var(--radius) * 1.4);
+    background: var(--card);
+  }
+
+  .gradient-border-card::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(
+      125deg,
+      rgba(39, 83, 255, 0.25) 0%,
+      rgba(124, 58, 237, 0.2) 45%,
+      rgba(56, 189, 248, 0.15) 70%,
+      transparent 100%
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    transition: opacity 0.3s ease, background 0.4s ease;
+  }
+
+  .gradient-border-card:hover::before {
+    background: linear-gradient(
+      125deg,
+      rgba(39, 83, 255, 0.5) 0%,
+      rgba(124, 58, 237, 0.4) 50%,
+      rgba(56, 189, 248, 0.3) 100%
+    );
+  }
+
+  /* The primary CTA sits above the card surfaces, with WebThreads blue-purple gradient */
+  .cta-glow {
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.28),
+      0 12px 32px -12px rgba(124, 58, 237, 0.65);
+  }
+  .cta-glow:hover {
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.35),
+      0 18px 40px -10px rgba(39, 83, 255, 0.75);
+  }
+  .cta-glow:hover {
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.35),
+      0 18px 40px -10px rgba(168, 101, 251, 0.75);
+  }
+
+  /* Cropped, fading bottom edge for the product preview. */
+  .preview-fade {
+    mask-image: linear-gradient(
+      to bottom,
+      black 80%,
+      color-mix(in oklch, black 72%, transparent) 94%,
+      transparent 100%
+    );
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .animate-fade,
+  .animate-pop,
+  .animate-ping {
+    animation: none;
+  }
+  .btn-fill,
+  .btn-outline-fill {
+    transition: none;
+  }
+  .btn-fill:hover {
+    transform: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* Gradient text relies on background-clip; forced-colours modes drop the
+   background but keep -webkit-text-fill-color, which would erase the word. */
+@media screen and (forced-colors: active) {
+  .text-gradient-logo {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: CanvasText;
+  }
 }
