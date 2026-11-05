@@ -19,6 +19,9 @@ export function DemoCourses({
 }) {
   const hasUserCourses = signedIn && userCourses.length > 0;
 
+  // Signed-in users with no courses yet: hide the demo section entirely
+  if (signedIn && !hasUserCourses) return null;
+
   if (hasUserCourses) {
     return (
       <section className="mx-auto w-full max-w-[1400px] px-4 pb-16 sm:px-8">
