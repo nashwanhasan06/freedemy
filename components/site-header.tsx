@@ -1,15 +1,17 @@
-import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { AigniteBadge } from "@/components/aignite-badge";
+import { AuthNav } from "@/components/auth-nav";
 import { Brand } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 type SiteHeaderProps = {
   right?: ReactNode;
   className?: string;
 };
+
+export { AigniteBadge };
 
 export function SiteHeader({ right, className }: SiteHeaderProps) {
   return (
@@ -20,32 +22,24 @@ export function SiteHeader({ right, className }: SiteHeaderProps) {
         className,
       )}
     >
-      <div className="mx-auto flex h-14 w-full max-w-[1400px] items-center justify-between gap-4 px-4 sm:px-8">
-        <Brand />
-        <nav className="flex items-center gap-1.5">
-          {right ?? (
-            <>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-8 px-3 text-[0.83rem]"
-                render={<Link href="/dashboard" />}
-                nativeButton={false}
-              >
-                Dashboard
-              </Button>
-              <Button
-                size="sm"
-                className="h-8 px-3 text-[0.83rem]"
-                render={<Link href="/#paste" />}
-                nativeButton={false}
-              >
-                New course
-              </Button>
-            </>
-          )}
-          <ThemeToggle />
-        </nav>
+      <div className="mx-auto w-full max-w-[1400px] px-4 sm:px-8">
+        <div className="flex items-center justify-between gap-2 py-2 sm:grid sm:h-16 sm:grid-cols-[1fr_auto_1fr] sm:items-center sm:gap-3 sm:py-0">
+          <Brand className="min-w-0 shrink-0 justify-self-start" />
+
+          <div className="hidden justify-self-center sm:block">
+            <AigniteBadge className="sm:h-10 lg:h-12" />
+          </div>
+
+          <nav className="flex shrink-0 items-center justify-end gap-1 sm:gap-1.5 sm:justify-self-end">
+            {right ?? <AuthNav />}
+            <ThemeToggle />
+          </nav>
+        </div>
+
+        {/* Narrow screens keep the full lockup visible on its own centred row. */}
+        <div className="flex justify-center pb-2 sm:hidden">
+          <AigniteBadge />
+        </div>
       </div>
     </header>
   );

@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -44,3 +45,10 @@ next-env.d.ts
 /audit/*.json.gz
 /audit/lighthouse*
 /audit/shots
+.dev.log
+.tmp-dev.log
+chats-previous.md
+prev-chat.md
+current-chats.json
+fix-project-package-run-errors.json
+thread-*.md

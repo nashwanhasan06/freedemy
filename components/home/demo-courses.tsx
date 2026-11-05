@@ -2,11 +2,54 @@ import { ArrowUpRight, Layers } from "lucide-react";
 import Link from "next/link";
 
 import { CourseCover } from "@/components/course-cover";
+import { CourseCard } from "@/components/course-card";
 import { courseLessons } from "@/lib/course";
 import { formatLength } from "@/lib/format";
+import type { CourseSummary } from "@/lib/db/courses";
 import type { Course } from "@/lib/types";
 
-export function DemoCourses({ courses }: { courses: Course[] }) {
+export function DemoCourses({
+  courses,
+  userCourses = [],
+  signedIn = false,
+}: {
+  courses: Course[];
+  userCourses?: CourseSummary[];
+  signedIn?: boolean;
+}) {
+  const hasUserCourses = signedIn && userCourses.length > 0;
+
+  if (hasUserCourses) {
+    return (
+      <section className="mx-auto w-full max-w-[1400px] px-4 pb-16 sm:px-8">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <h2 className="text-[1.05rem] font-semibold tracking-tight">Recent courses</h2>
+          </div>
+          <Link
+            href="/dashboard"
+            className="inline-flex items-center gap-1 text-[0.8rem] font-medium text-primary hover:underline"
+          >
+            All courses
+            <ArrowUpRight className="size-3.5" />
+          </Link>
+        </div>
+
+        <div className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {userCourses.slice(0, 3).map((entry) => (
+            <CourseCard
+              key={entry.course.slug}
+              course={entry.course}
+              grades={entry.grades}
+              progress={entry.progress}
+              projectPassed={entry.projectPassed}
+            />
+          ))}
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="mx-auto w-full max-w-[1400px] px-4 pb-16 sm:px-8">
       <div className="flex flex-wrap items-end justify-between gap-2">
@@ -15,16 +58,18 @@ export function DemoCourses({ courses }: { courses: Course[] }) {
             Or open a finished course
           </h2>
           <p className="mt-1 text-[0.82rem] text-muted-foreground">
-            Jump straight in — no setup, no waiting.
+            Ready-made coding and CS courses — no setup, no waiting.
           </p>
         </div>
-        <Link
-          href="/dashboard"
-          className="hidden items-center gap-1 text-[0.8rem] font-medium text-primary hover:underline sm:inline-flex"
-        >
-          Your dashboard
-          <ArrowUpRight className="size-3.5" />
-        </Link>
+        {signedIn && (
+          <Link
+            href="/dashboard"
+            className="hidden items-center gap-1 text-[0.8rem] font-medium text-primary hover:underline sm:inline-flex"
+          >
+            Your dashboard
+            <ArrowUpRight className="size-3.5" />
+          </Link>
+        )}
       </div>
 
       <div className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">

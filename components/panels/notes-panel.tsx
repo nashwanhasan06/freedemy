@@ -4,8 +4,9 @@ import { Check, Copy } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
-import type { Lesson } from "@/lib/types";
+import { noteBody, type Lesson } from "@/lib/types";
 
 export function NotesPanel({ lesson }: { lesson: Lesson }) {
   const [copied, setCopied] = useState(false);
@@ -13,9 +14,7 @@ export function NotesPanel({ lesson }: { lesson: Lesson }) {
   const plainText = useMemo(() => {
     const lines: string[] = [`${lesson.title} — Notes`, ""];
     for (const block of lesson.notes) {
-      lines.push(block.heading.toUpperCase());
-      for (const bullet of block.bullets) lines.push(`• ${bullet}`);
-      lines.push("");
+      lines.push(block.heading.toUpperCase(), "", noteBody(block).trim(), "");
     }
     return lines.join("\n").trim();
   }, [lesson]);
@@ -54,18 +53,8 @@ export function NotesPanel({ lesson }: { lesson: Lesson }) {
       <div className="flex flex-col gap-7 px-5 py-6 sm:px-7">
         {lesson.notes.map((block) => (
           <section key={block.heading}>
-            <h2 className="text-[0.95rem] font-semibold tracking-tight">{block.heading}</h2>
-            <ul className="mt-3 flex flex-col gap-2.5">
-              {block.bullets.map((bullet) => (
-                <li
-                  key={bullet}
-                  className="flex gap-2.5 text-[0.9rem] leading-[1.75] text-foreground"
-                >
-                  <span className="mt-[0.45rem] size-1.5 shrink-0 rounded-full bg-primary/60" />
-                  <span>{bullet}</span>
-                </li>
-              ))}
-            </ul>
+            <h2 className="text-[0.98rem] font-semibold tracking-tight">{block.heading}</h2>
+            <Markdown className="mt-2.5" content={noteBody(block)} />
           </section>
         ))}
 

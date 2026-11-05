@@ -5,85 +5,140 @@ import {
   ArrowRight,
   CheckCircle2,
   Circle,
-  FileText,
   Loader2,
   RotateCcw,
 } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
-import { getCourseByVideoId, FEATURED_COURSE } from "@/lib/demo-data";
-import { courseLessons } from "@/lib/course";
-import type { Course } from "@/lib/types";
+import { retryCourseAction } from "@/lib/actions/courses";
 import { cn } from "@/lib/utils";
 
+type CourseStatus = {
+  id: string;
+  slug: string;
+  title: string;
+  status: "queued" | "fetching" | "outlining" | "writing" | "ready" | "failed";
+  stage: string;
+  error: string | null;
+  lessons: number;
+  modules: number;
+};
+
 const STEPS = [
-  { id: "transcript", label: "Fetching transcript", detail: "Reading the video's captions", ms: 1500 },
-  { id: "sections", label: "Finding sections", detail: "Matching chapter timestamps", ms: 1400 },
-  { id: "notes", label: "Writing notes", detail: "Summaries and key terms per section", ms: 2100 },
-  { id: "assignments", label: "Building assignments", detail: "Questions, answers and timestamps", ms: 1800 },
+  {
+    id: "transcript",
+    label: "Fetching the transcript",
+    detail: "Captions, description and video details",
+    statuses: ["queued", "fetching"],
+  },
+  {
+    id: "sections",
+    label: "Finding the structure",
+    detail: "Timestamped topics, then modules and lessons",
+    statuses: ["outlining"],
+  },
+  {
+    id: "writing",
+    label: "Writing notes and exercises",
+    detail: "Notes, quizzes and coding tasks per section",
+    statuses: ["writing"],
+  },
 ];
 
-type Stage = "running" | "transcript-error" | "ai-error" | "done";
+function stepIndex(status: CourseStatus["status"]): number {
+  if (status === "queued" || status === "fetching") return 0;
+  if (status === "outlining") return 1;
+  if (status === "writing") return 2;
+  return 3;
+}
 
-export function GeneratingPipeline() {
+function progressFor(course: CourseStatus | null): number {
+  if (!course) return 4;
+  if (course.status === "ready") return 100;
+
+  const written = /Writing\s+(\d+)\s+of\s+(\d+)/i.exec(course.stage);
+  if (written) {
+    const done = Number(written[1]);
+    const total = Math.max(1, Number(written[2]));
+    return Math.min(96, 45 + Math.round((done / total) * 50));
+  }
+
+  if (course.status === "writing") return 45;
+  if (course.status === "outlining") return 32;
+  if (course.status === "fetching") return 18;
+  return 6;
+}
+
+export function GeneratingPipeline({ courseId }: { courseId: string }) {
   const router = useRouter();
-  const params = useSearchParams();
-  const videoId = params.get("v") ?? "";
-
-  const sourceCourse = useMemo(() => getCourseByVideoId(videoId), [videoId]);
-  const [target, setTarget] = useState<Course | null>(sourceCourse ?? null);
-  const [stage, setStage] = useState<Stage>("running");
-  const [step, setStep] = useState(0);
-  const [transcript, setTranscript] = useState("");
-  const [pasteOpen, setPasteOpen] = useState(false);
+  const [course, setCourse] = useState<CourseStatus | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
-    if (stage !== "running") return;
+    let cancelled = false;
+    let timer: number | undefined;
 
-    if (!target) {
-      const timer = window.setTimeout(() => setStage("transcript-error"), 1200);
-      return () => window.clearTimeout(timer);
+    async function poll() {
+      try {
+        const response = await fetch(`/api/courses/${courseId}/status`, {
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          if (!cancelled) {
+            setFetchError(
+              response.status === 404
+                ? "That course no longer exists."
+                : response.status === 401
+                  ? "Your session expired. Sign in again to continue."
+                  : "Lost contact with the server — retrying.",
+            );
+          }
+          return;
+        }
+
+        const data = (await response.json()) as CourseStatus;
+        if (cancelled) return;
+
+        setCourse(data);
+        setFetchError(null);
+
+        if (data.status === "ready") {
+          window.setTimeout(() => {
+            if (!cancelled) router.replace(`/course/${data.slug}`);
+          }, 700);
+          return;
+        }
+
+        if (data.status !== "failed") {
+          timer = window.setTimeout(poll, 1_600);
+        }
+      } catch {
+        if (!cancelled) {
+          setFetchError("Lost contact with the server — retrying.");
+          timer = window.setTimeout(poll, 2_500);
+        }
+      }
     }
 
-    if (step >= STEPS.length) {
-      const complete = window.setTimeout(() => setStage("done"), 250);
-      const navigate = window.setTimeout(() => router.push(`/course/${target.slug}`), 1450);
-      return () => {
-        window.clearTimeout(complete);
-        window.clearTimeout(navigate);
-      };
-    }
+    void poll();
 
-    const timer = window.setTimeout(() => setStep((value) => value + 1), STEPS[step].ms);
-    return () => window.clearTimeout(timer);
-  }, [stage, step, target, router]);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [courseId, router]);
 
-  function restart() {
-    setStep(0);
-    setStage("running");
-  }
-
-  function submitTranscript() {
-    const words = transcript.trim().split(/\s+/).filter(Boolean).length;
-    if (words < 120) {
-      setStage("ai-error");
-      return;
-    }
-    setTarget(FEATURED_COURSE);
-    setPasteOpen(false);
-    restart();
-    toast.success("Transcript accepted — rebuilding the course");
-  }
-
-  const value = Math.round((Math.min(step, STEPS.length) / STEPS.length) * 100);
-  const lessonCount = target ? courseLessons(target).length : 0;
+  const failed = course?.status === "failed";
+  const active = course ? stepIndex(course.status) : 0;
+  const value = progressFor(course);
+  const ready = course?.status === "ready";
 
   return (
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_330px]">
@@ -93,40 +148,46 @@ export function GeneratingPipeline() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-[0.68rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
-                  {stage === "done" ? "Course ready" : "Generating course"}
+                  {ready ? "Course ready" : failed ? "Generation stopped" : "Generating course"}
                 </p>
                 <h1 className="mt-1 text-[1.05rem] font-semibold tracking-tight">
-                  {target ? target.title : "Reading the video…"}
+                  {ready || failed ? (course?.title ?? "Your course") : "Reading the video…"}
                 </h1>
                 <p className="mt-0.5 text-[0.75rem] text-muted-foreground">
-                  {target ? `${target.channel} · ${lessonCount} sections` : videoId}
+                  {course?.stage ?? "Queued"}
+                  {course && course.lessons > 0
+                    ? ` · ${course.modules} modules · ${course.lessons} sections`
+                    : ""}
                 </p>
+                {!ready && !failed && course && course.lessons > 0 && (
+                  <p className="mt-1 text-[0.72rem] text-muted-foreground">
+                    Finished sections are readable now — the rest arrive as they&apos;re written.
+                  </p>
+                )}
               </div>
-              {stage === "done" && target && (
+              {course && course.lessons > 0 && (
                 <Button
                   size="sm"
                   className="h-8 gap-1.5"
-                  onClick={() => router.push(`/course/${target.slug}`)}
+                  onClick={() => router.replace(`/course/${course.slug}`)}
                 >
-                  Open
+                  {ready ? "Open" : "Start reading"}
                   <ArrowRight className="size-3.5" />
                 </Button>
               )}
             </div>
 
             <div className="mt-4 flex items-center gap-3">
-              <Progress value={stage === "done" ? 100 : value} className="flex-1" />
+              <Progress value={value} className="flex-1" />
               <span className="text-[0.72rem] font-medium tabular-nums text-muted-foreground">
-                {stage === "done" ? 100 : value}%
+                {value}%
               </span>
             </div>
 
             <ol className="mt-4 flex flex-col">
               {STEPS.map((item, index) => {
-                const complete = step > index || stage === "done";
-                const active = step === index && stage === "running";
-                const failed =
-                  (stage === "transcript-error" || stage === "ai-error") && index === step;
+                const complete = ready || index < active;
+                const running = !failed && index === active;
 
                 return (
                   <li
@@ -135,9 +196,9 @@ export function GeneratingPipeline() {
                       "flex items-start gap-3 border-l-2 py-2.5 pl-3 transition-colors",
                       complete
                         ? "border-primary/30"
-                        : active
+                        : running
                           ? "border-primary"
-                          : failed
+                          : failed && index === active
                             ? "border-destructive/50"
                             : "border-border/70",
                     )}
@@ -145,10 +206,10 @@ export function GeneratingPipeline() {
                     <span className="mt-0.5">
                       {complete ? (
                         <CheckCircle2 className="size-4 text-primary" />
-                      ) : active ? (
-                        <Loader2 className="size-4 animate-spin text-primary" />
-                      ) : failed ? (
+                      ) : failed && index === active ? (
                         <AlertCircle className="size-4 text-destructive" />
+                      ) : running ? (
+                        <Loader2 className="size-4 animate-spin text-primary" />
                       ) : (
                         <Circle className="size-4 text-muted-foreground/40" />
                       )}
@@ -157,13 +218,13 @@ export function GeneratingPipeline() {
                       <p
                         className={cn(
                           "text-[0.85rem] leading-tight font-medium",
-                          complete || active ? "text-foreground" : "text-muted-foreground",
+                          complete || running ? "text-foreground" : "text-muted-foreground",
                         )}
                       >
                         {item.label}
                       </p>
                       <p className="mt-0.5 text-[0.72rem] text-muted-foreground">
-                        {complete ? "Done" : active ? item.detail : "Waiting"}
+                        {complete ? "Done" : running ? course?.stage ?? item.detail : item.detail}
                       </p>
                     </div>
                   </li>
@@ -173,100 +234,52 @@ export function GeneratingPipeline() {
           </CardContent>
         </Card>
 
-        {stage === "transcript-error" && (
-          <Card className="animate-rise border-destructive/20">
+        {failed && (
+          <Card className="animate-rise border-destructive/25">
             <CardContent className="pt-1">
               <div className="flex items-start gap-3">
                 <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
                 <div className="min-w-0">
-                  <p className="text-[0.9rem] font-medium">
-                    We couldn&apos;t fetch the transcript
-                  </p>
+                  <p className="text-[0.9rem] font-medium">We couldn&apos;t build this course</p>
                   <p className="mt-1 text-[0.82rem] leading-relaxed text-muted-foreground">
-                    Captions are disabled on this video, or YouTube blocked the request.
-                    Paste the transcript yourself and we&apos;ll finish from there.
+                    {course?.error ?? "The transcript could not be processed."}
                   </p>
-
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Button
                       size="sm"
                       className="h-9 gap-1.5"
-                      onClick={() => setPasteOpen((open) => !open)}
+                      disabled={retrying}
+                      onClick={() => {
+                        setRetrying(true);
+                        void retryCourseAction(courseId).finally(() => setRetrying(false));
+                      }}
                     >
-                      <FileText className="size-3.5" />
-                      Paste a transcript
-                    </Button>
-                    <Button variant="outline" size="sm" className="h-9 gap-1.5" onClick={restart}>
-                      <RotateCcw className="size-3.5" />
+                      {retrying ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <RotateCcw className="size-3.5" />
+                      )}
                       Try again
                     </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-9"
+                      onClick={() => router.push("/#paste")}
+                    >
+                      Use a different video
+                    </Button>
                   </div>
-
-                  {pasteOpen && (
-                    <div className="mt-3 flex flex-col gap-2">
-                      <Textarea
-                        value={transcript}
-                        onChange={(event) => setTranscript(event.target.value)}
-                        rows={5}
-                        placeholder="Paste the captions or your own notes from the video…"
-                        className="min-h-28 resize-y text-[0.82rem]"
-                      />
-                      <div className="flex items-center gap-2">
-                        <Button size="sm" className="h-9" onClick={submitTranscript}>
-                          Build course
-                        </Button>
-                        <span className="text-[0.7rem] text-muted-foreground">
-                          {transcript.trim().split(/\s+/).filter(Boolean).length} words
-                        </span>
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
             </CardContent>
           </Card>
         )}
 
-        {stage === "ai-error" && (
-          <Card className="animate-rise border-destructive/20">
-            <CardContent className="pt-1">
-              <div className="flex items-start gap-3">
-                <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
-                <div>
-                  <p className="text-[0.9rem] font-medium">
-                    The model couldn&apos;t finish this one
-                  </p>
-                  <p className="mt-1 text-[0.82rem] leading-relaxed text-muted-foreground">
-                    Transcript was too short to build a course from. Add more of the
-                    video&apos;s content, or try a different lecture.
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Button size="sm" className="h-9 gap-1.5" onClick={() => setPasteOpen(true)}>
-                      <FileText className="size-3.5" />
-                      Edit transcript
-                    </Button>
-                    <Button variant="outline" size="sm" className="h-9 gap-1.5" onClick={restart}>
-                      <RotateCcw className="size-3.5" />
-                      Retry
-                    </Button>
-                  </div>
-                  {pasteOpen && (
-                    <div className="mt-3 flex flex-col gap-2">
-                      <Textarea
-                        value={transcript}
-                        onChange={(event) => setTranscript(event.target.value)}
-                        rows={5}
-                        className="min-h-28 resize-y text-[0.82rem]"
-                      />
-                      <Button size="sm" className="h-9 w-fit" onClick={submitTranscript}>
-                        Build course
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+        {fetchError && !failed && (
+          <p className="rounded-lg border border-warning/40 bg-warning-soft px-3 py-2 text-[0.8rem] text-warning-ink">
+            {fetchError}
+          </p>
         )}
       </div>
 
@@ -290,7 +303,9 @@ export function GeneratingPipeline() {
             ))}
           </div>
           <p className="mt-5 text-[0.7rem] leading-relaxed text-muted-foreground">
-            Sections build in parallel — most lectures are done in under a minute.
+            The model reads the transcript in windows, then writes each module. Requests are
+            paced to stay inside the account&apos;s rate limit, so a long lecture can take a
+            couple of minutes.
           </p>
         </div>
       </div>

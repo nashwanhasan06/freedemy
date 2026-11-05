@@ -1,4 +1,4 @@
-/** Shared content model for the UI. All data in this build is static demo data. */
+/** Shared content model. Rows from Supabase are mapped into these shapes. */
 
 export type KeyTerm = {
   term: string;
@@ -7,8 +7,20 @@ export type KeyTerm = {
 
 export type NoteBlock = {
   heading: string;
-  bullets: string[];
+  /**
+   * Markdown prose: paragraphs, lists, tables, fenced code and ```mermaid
+   * diagrams. This is what the notes panel renders.
+   */
+  body?: string;
+  /** Older courses and the demo fixtures only have bullets. */
+  bullets?: string[];
 };
+
+/** Markdown for a note block, whichever shape it was stored in. */
+export function noteBody(block: NoteBlock): string {
+  if (block.body && block.body.trim()) return block.body;
+  return (block.bullets ?? []).map((bullet) => `- ${bullet}`).join("\n");
+}
 
 export type Mcq = {
   id: string;
@@ -25,12 +37,25 @@ export type Mcq = {
 };
 
 export type ShortAnswer = {
+  /** Exercise row id in Supabase; demo fixtures used for seeding have none. */
+  id?: string;
   prompt: string;
   placeholder: string;
-  /** Grading fixture: an answer that mentions any keyword is accepted. */
+  /** Fallback grading fixture when the model is unavailable. */
   keywords: string[];
   model: string;
   misconception: string;
+  explanation: string;
+  at: number;
+};
+
+export type CodeExercise = {
+  id: string;
+  prompt: string;
+  language: string;
+  starterCode: string;
+  hint: string;
+  solution: string;
   explanation: string;
   at: number;
 };
@@ -45,9 +70,11 @@ export type Lesson = {
   keyTerms: KeyTerm[];
   notes: NoteBlock[];
   questions: Mcq[];
-  shortAnswer: ShortAnswer;
+  shortAnswer?: ShortAnswer;
   /** Extra questions served by the "Try another question" button. */
   practiceBank: Mcq[];
+  /** Coding tasks, graded by the tutor model against the exercise brief. */
+  codeExercises?: CodeExercise[];
 };
 
 export type Chapter = {
@@ -57,6 +84,8 @@ export type Chapter = {
 };
 
 export type Course = {
+  /** Database id for generated courses; demo data used on the landing page has none. */
+  id?: string;
   slug: string;
   title: string;
   channel: string;
@@ -66,6 +95,11 @@ export type Course = {
   chapters: Chapter[];
   /** Lessons that already have a graded assignment, as lessonId -> score. */
   seeded: Record<string, number>;
+  status?: string;
+  stage?: string;
+  error?: string | null;
+  language?: string;
+  durationSeconds?: number;
 };
 
 export type GradedLesson = {
@@ -75,3 +109,30 @@ export type GradedLesson = {
 };
 
 export type GradeMap = Record<string, GradedLesson>;
+
+export type ExerciseError = {
+  severity: "error" | "warning" | "tip";
+  message: string;
+  line?: number;
+  code?: string;
+};
+
+export type ExerciseFeedback = {
+  exerciseId: string;
+  kind: "mcq" | "short" | "code";
+  correct: boolean;
+  score: number;
+  maxScore: number;
+  feedback: string;
+  errors: ExerciseError[];
+  at?: number;
+};
+
+export type AssignmentResult = {
+  score: number;
+  correct: number;
+  total: number;
+  passed: boolean;
+  exercises: ExerciseFeedback[];
+  summary?: string;
+};

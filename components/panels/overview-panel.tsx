@@ -1,6 +1,6 @@
 "use client";
 
-import { Clock3, Play } from "lucide-react";
+import { Clock3, ExternalLink, Play } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,9 +10,13 @@ import type { Lesson } from "@/lib/types";
 type OverviewPanelProps = {
   lesson: Lesson;
   onRewatch: (at: number) => void;
+  videoSource?: {
+    videoId: string;
+    channel: string;
+  };
 };
 
-export function OverviewPanel({ lesson, onRewatch }: OverviewPanelProps) {
+export function OverviewPanel({ lesson, onRewatch, videoSource }: OverviewPanelProps) {
   return (
     <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_280px]">
       <div className="flex flex-col gap-4">
@@ -71,6 +75,23 @@ export function OverviewPanel({ lesson, onRewatch }: OverviewPanelProps) {
               <Play className="size-3.5 fill-primary text-primary" />
               Rewatch from start
             </Button>
+
+            {videoSource && (
+              <a
+                href={`https://www.youtube.com/watch?v=${videoSource.videoId}`}
+                target="_blank"
+                rel="noreferrer"
+                className="group flex items-center justify-between gap-2 rounded-lg border border-border/80 bg-background/50 px-3 py-2 text-[0.74rem] text-muted-foreground transition-all duration-200 hover:border-border hover:bg-accent/40 hover:text-foreground"
+              >
+                <div className="flex items-center gap-2 truncate">
+                  <span className="flex size-2 rounded-full bg-red-500/80" />
+                  <span className="truncate">
+                    Source lecture · <strong className="font-medium text-foreground">{videoSource.channel}</strong>
+                  </span>
+                </div>
+                <ExternalLink className="size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-foreground" />
+              </a>
+            )}
           </CardContent>
         </Card>
 

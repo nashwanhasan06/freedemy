@@ -15,11 +15,11 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: {
-    default: "Freedemy — turn any lecture into a course you can pass",
+    default: "Freedemy — turn a coding lecture into a course you can pass",
     template: "%s · Freedemy",
   },
   description:
-    "Paste a YouTube course link and get chapters, notes, assignments and a tutor that checks your mistakes against the exact moment in the video.",
+    "Paste a YouTube coding or computer-science lecture and get chapters, notes, assignments and a tutor that checks your mistakes against the exact moment in the video.",
 };
 
 /* Runs before paint so a stored light preference never flashes the dark canvas. */
@@ -30,6 +30,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
+      data-theme="dark"
       data-scroll-behavior="smooth"
       // The inline script below sets the class before paint, so it differs from the server output.
       suppressHydrationWarning

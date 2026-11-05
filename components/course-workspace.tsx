@@ -1,21 +1,32 @@
 "use client";
 
-import { ArrowLeft, ArrowUpRight, ListTree } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowUpRight,
+  Flag,
+  ListTree,
+  Loader2,
+  Sparkles,
+  TriangleAlert,
+} from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AigniteBadge } from "@/components/aignite-badge";
 import { Brand } from "@/components/brand";
+import { SignOutButton } from "@/components/sign-out-button";
 import { CoursePlayer } from "@/components/course-player";
 import { Curriculum } from "@/components/curriculum";
 import { AssignmentPanel } from "@/components/panels/assignment-panel";
 import { NotesPanel } from "@/components/panels/notes-panel";
 import { OverviewPanel } from "@/components/panels/overview-panel";
-import { TutorPanel } from "@/components/panels/tutor-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { TutorCta } from "@/components/tutor/tutor-cta";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { adjacentLesson, courseLessons, seedGrades } from "@/lib/course";
+import { adjacentLesson, courseLessons } from "@/lib/course";
 import { formatLength } from "@/lib/format";
 import type { Course, GradeMap, GradedLesson } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -28,14 +39,34 @@ const TABS = [
   { value: "tutor", label: "Tutor" },
 ];
 
-export function CourseWorkspace({ course }: { course: Course }) {
+export function CourseWorkspace({
+  course,
+  initialGrades,
+  project,
+}: {
+  course: Course;
+  initialGrades: GradeMap;
+  /** Whether the capstone brief exists, and whether it has been passed. */
+  project?: { exists: boolean; passed: boolean };
+}) {
   const lessons = useMemo(() => courseLessons(course), [course]);
   const [activeLessonId, setActiveLessonId] = useState(lessons[0]?.id ?? "");
-  const [grades, setGrades] = useState<GradeMap>(() => seedGrades(course));
+  const [grades, setGrades] = useState<GradeMap>(() => initialGrades);
   const [tab, setTab] = useState("overview");
   const [autoPlayNext, setAutoPlayNext] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const playerRef = useRef<YouTubePlayer | null>(null);
+  const router = useRouter();
+
+  // The course can be opened before the build finishes: sections are saved one
+  // at a time. Re-render the server page periodically so newly written sections
+  // show up without the student reloading by hand.
+  const building = Boolean(course.status && course.status !== "ready" && course.status !== "failed");
+  useEffect(() => {
+    if (!building) return;
+    const timer = window.setInterval(() => router.refresh(), 20_000);
+    return () => window.clearInterval(timer);
+  }, [building, router]);
 
   const activeLesson = useMemo(
     () => lessons.find((lesson) => lesson.id === activeLessonId) ?? lessons[0],
@@ -90,7 +121,11 @@ export function CourseWorkspace({ course }: { course: Course }) {
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-40 border-b border-border/80 bg-background/90 backdrop-blur-md">
         <div className="mx-auto flex h-14 w-full max-w-[1400px] items-center justify-between gap-4 px-4 sm:px-8">
-          <Brand />
+          <Brand className="min-w-0 shrink-0" />
+
+          <div className="hidden sm:block">
+            <AigniteBadge className="h-8 w-auto sm:h-9" />
+          </div>
 
           <nav className="flex items-center gap-1.5 sm:gap-2">
             <div className="hidden items-center gap-2 sm:flex">
@@ -116,6 +151,7 @@ export function CourseWorkspace({ course }: { course: Course }) {
               </span>
             </div>
 
+            <SignOutButton className="h-7 px-2 text-[0.75rem]" />
             <ThemeToggle />
           </nav>
         </div>
@@ -136,6 +172,44 @@ export function CourseWorkspace({ course }: { course: Course }) {
       </header>
 
       <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 sm:px-8 lg:py-7">
+        {building && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning/40 bg-warning-soft px-3 py-2 text-[0.78rem] text-warning-ink">
+            <span className="flex items-center gap-1.5">
+              <Loader2 className="size-3.5 animate-spin" />
+              Still building · {course.stage ?? "Writing sections"} — {lessons.length}{" "}
+              {lessons.length === 1 ? "section" : "sections"} ready, the rest arrive here as
+              they&apos;re written.
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[0.75rem] text-warning-ink hover:bg-warning/15"
+              onClick={() => router.refresh()}
+            >
+              Check now
+            </Button>
+          </div>
+        )}
+
+        {course.status === "failed" && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[0.78rem] text-destructive">
+            <span className="flex items-center gap-1.5">
+              <TriangleAlert className="size-3.5" />
+              The build stopped — these {lessons.length} sections were saved. The rest never
+              finished.
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[0.75rem] text-destructive hover:bg-destructive/10"
+              render={<Link href={`/generating?course=${course.id ?? ""}`} />}
+              nativeButton={false}
+            >
+              Retry the build
+            </Button>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-7 lg:grid-cols-[minmax(0,1fr)_352px]">
           <div className="min-w-0">
             {/* Not sticky on phones: the player is ~38% of the viewport there and panels
@@ -195,6 +269,25 @@ export function CourseWorkspace({ course }: { course: Course }) {
                         {item.label}
                       </TabsTrigger>
                     ))}
+                    <Link
+                      href={`/course/${course.slug}/project`}
+                      className={cn(
+                        "group relative ml-2 inline-flex h-10 items-center gap-1.5 px-3 text-[0.82rem] font-medium transition-colors sm:px-4 sm:text-[0.84rem]",
+                        project?.passed
+                          ? "text-success-ink hover:text-success-ink/80"
+                          : "text-primary hover:text-primary/80",
+                      )}
+                    >
+                      <Sparkles className="size-3.5 text-primary transition-transform duration-200 group-hover:scale-110" />
+                      <span>Final Project</span>
+                      {project?.passed ? (
+                        <span className="rounded-full bg-success-ink px-1.5 py-0.2 text-[0.58rem] font-bold text-white uppercase tracking-wider">
+                          Passed
+                        </span>
+                      ) : (
+                        <ArrowUpRight className="size-3.5 text-primary/70 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+                      )}
+                    </Link>
                   </TabsList>
                   <Button
                     variant="outline"
@@ -208,7 +301,14 @@ export function CourseWorkspace({ course }: { course: Course }) {
                 </div>
 
                 <TabsContent value="overview" className="mt-5 animate-fade">
-                  <OverviewPanel lesson={activeLesson} onRewatch={rewatch} />
+                  <OverviewPanel
+                    lesson={activeLesson}
+                    onRewatch={rewatch}
+                    videoSource={{
+                      videoId: course.videoId,
+                      channel: course.channel,
+                    }}
+                  />
                 </TabsContent>
                 <TabsContent value="notes" className="mt-5 animate-fade">
                   <NotesPanel lesson={activeLesson} />
@@ -217,13 +317,18 @@ export function CourseWorkspace({ course }: { course: Course }) {
                   <AssignmentPanel
                     key={activeLesson.id}
                     lesson={activeLesson}
+                    tutorHref={`/course/${course.slug}/tutor?lesson=${activeLesson.id}`}
                     onRewatch={rewatch}
                     onGraded={handleGraded}
                     lastGrade={grades[activeLesson.id]}
                   />
                 </TabsContent>
                 <TabsContent value="tutor" className="mt-5 animate-fade">
-                  <TutorPanel key={activeLesson.id} lesson={activeLesson} onRewatch={rewatch} />
+                  <TutorCta
+                    key={activeLesson.id}
+                    href={`/course/${course.slug}/tutor?lesson=${activeLesson.id}`}
+                    lessonTitle={activeLesson.title}
+                  />
                 </TabsContent>
               </Tabs>
             </div>
@@ -258,19 +363,6 @@ export function CourseWorkspace({ course }: { course: Course }) {
                   />
                 </div>
               </div>
-
-              <a
-                href={`https://www.youtube.com/watch?v=${course.videoId}`}
-                target="_blank"
-                rel="noreferrer"
-                className={cn(
-                  "mt-3 flex items-center justify-between gap-2 rounded-lg px-1 py-1 text-[0.72rem] text-muted-foreground",
-                  "transition-colors hover:text-foreground",
-                )}
-              >
-                <span>Original video · {course.channel}</span>
-                <ArrowUpRight className="size-3.5" />
-              </a>
             </div>
           </aside>
         </div>
@@ -291,6 +383,33 @@ export function CourseWorkspace({ course }: { course: Course }) {
               grades={grades}
               onSelect={selectLesson}
             />
+          </div>
+          <div className="border-t border-border/80 p-3 bg-muted/20">
+            <Link
+              href={`/course/${course.slug}/project`}
+              onClick={() => setDrawerOpen(false)}
+              className={cn(
+                "group flex items-center justify-between gap-3 rounded-xl border p-3 transition-all",
+                project?.passed
+                  ? "border-success/40 bg-success-soft/70"
+                  : "border-primary/40 bg-gradient-to-br from-primary/10 via-card to-card",
+              )}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-primary/40 bg-primary/15 text-primary">
+                  <Sparkles className="size-3.5 fill-primary/30" />
+                </div>
+                <div className="min-w-0 text-left">
+                  <span className="block text-[0.8rem] font-semibold text-foreground">
+                    Final Capstone Project
+                  </span>
+                  <span className="block truncate text-[0.68rem] text-muted-foreground">
+                    {project?.passed ? "Passed" : "Test complete course knowledge"}
+                  </span>
+                </div>
+              </div>
+              <ArrowUpRight className="size-4 shrink-0 text-muted-foreground" />
+            </Link>
           </div>
         </SheetContent>
       </Sheet>

@@ -22,7 +22,13 @@ function getThemeSnapshot() {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
 
-export function Hero() {
+export function Hero({
+  signedIn,
+  initialUrl,
+}: {
+  signedIn: boolean;
+  initialUrl?: string;
+}) {
   const theme = useSyncExternalStore(subscribeTheme, getThemeSnapshot, () => "dark" as const);
   const isLight = theme === "light";
 
@@ -75,20 +81,20 @@ export function Hero() {
 
       <div className="relative z-10 mx-auto w-full max-w-4xl px-4 pt-16 text-center sm:px-6 lg:pt-24">
         <h1 className="mx-auto max-w-[780px] text-[2.15rem] leading-[1.04] font-semibold tracking-[-0.035em] text-balance sm:text-[2.9rem] lg:text-[3.25rem]">
-          Studying made{" "}
+          Coding made{" "}
           <span className="text-gradient-logo font-bold uppercase">
-            Easier
+            EASIER
           </span>
           .
         </h1>
 
         <p className="mx-auto mt-6 max-w-[540px] text-[0.98rem] leading-relaxed text-pretty text-muted-foreground sm:text-base">
-          Drop a YouTube lecture. Get chapters, notes, and quizzes — with a tutor that
-          skips back to the exact moment you got something wrong.
+          Drop a YouTube lecture on coding or computer science. Get chapters, notes, and
+          quizzes — with a tutor that skips back to the exact moment you got something wrong.
         </p>
 
         <div id="paste" className="mt-10 scroll-mt-24">
-          <GenerateForm />
+          <GenerateForm signedIn={signedIn} initialUrl={initialUrl} />
         </div>
 
         <FeaturePills />
