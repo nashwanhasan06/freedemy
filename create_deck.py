@@ -204,7 +204,7 @@ def create_deck(output_path="d:/Freedemy/Freedemy-Presentation.pptx"):
     # -------------------------------------------------------------
     s4 = prs.slides.add_slide(blank_layout)
     set_slide_bg(s4)
-    add_header(s4, "Team Background", "Solo Developer Introduction", "Built independently for YUNet AIGnite Buildathon 2026.")
+    add_header(s4, "Team Background", "Solo Developer Introduction", "Built independently as a full-stack project.")
 
     # Left Card: Bio
     bio_w = Inches(5.66)

@@ -13,7 +13,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AigniteBadge } from "@/components/aignite-badge";
 import { Brand } from "@/components/brand";
 import { SignOutButton } from "@/components/sign-out-button";
 import { CoursePlayer } from "@/components/course-player";
@@ -122,10 +121,6 @@ export function CourseWorkspace({
       <header className="sticky top-0 z-40 border-b border-border/80 bg-background/90 backdrop-blur-md">
         <div className="mx-auto flex h-14 w-full max-w-[1400px] items-center justify-between gap-4 px-4 sm:px-8">
           <Brand className="min-w-0 shrink-0" />
-
-          <div className="hidden sm:block">
-            <AigniteBadge className="h-8 w-auto sm:h-9" />
-          </div>
 
           <nav className="flex items-center gap-1.5 sm:gap-2">
             <div className="hidden items-center gap-2 sm:flex">

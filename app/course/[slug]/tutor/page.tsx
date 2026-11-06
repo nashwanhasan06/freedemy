@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { connection } from "next/server";
 
-import { AigniteBadge } from "@/components/aignite-badge";
 import { Brand } from "@/components/brand";
 import { SignOutButton } from "@/components/sign-out-button";
 import { TutorChat } from "@/components/tutor/tutor-chat";
@@ -71,9 +70,6 @@ export default async function TutorPage({
       <header className="sticky top-0 z-40 border-b border-border/80 bg-background/90 backdrop-blur-md">
         <div className="mx-auto flex h-14 w-full max-w-[1200px] items-center justify-between gap-4 px-4 sm:px-8">
           <Brand className="min-w-0 shrink-0" />
-          <div className="hidden sm:block">
-            <AigniteBadge className="h-8 w-auto sm:h-9" />
-          </div>
           <div className="flex items-center gap-2">
             <SignOutButton className="h-8 px-2.5 text-[0.8rem]" />
             <ThemeToggle />
