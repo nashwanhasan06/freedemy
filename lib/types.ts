@@ -81,6 +81,12 @@ export type Chapter = {
   id: string;
   title: string;
   lessons: Lesson[];
+  /**
+   * Every section of this chapter has been generated: its lessons tile the
+   * chapter's slice of the video. Set for generated courses so the sidebar
+   * can show which chapters a running build has finished writing.
+   */
+  written?: boolean;
 };
 
 export type Course = {

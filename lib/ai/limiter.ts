@@ -28,29 +28,45 @@ export class AiRateLimiter {
   private timestamps: number[] = [];
   private running: Record<Priority, number> = { interactive: 0, background: 0 };
   private blockedUntil = 0;
+  /**
+   * Effective ceiling in requests per minute. Starts at `rpm` and is cut when
+   * the provider answers 429 — the account's real limit may be lower than the
+   * configured one — then earned back one per quiet minute.
+   */
+  private allowance: number;
+  private lastShrinkAt = 0;
 
   constructor(
     readonly rpm: number,
     readonly concurrency: number,
     readonly reserve: number,
     readonly backgroundConcurrency: number,
-  ) {}
+  ) {
+    this.allowance = rpm;
+  }
 
   private prune(now: number): void {
     const cutoff = now - 60_000;
-    if (this.timestamps.length === 0) return;
-    let keepFrom = 0;
-    while (keepFrom < this.timestamps.length && this.timestamps[keepFrom] <= cutoff) {
-      keepFrom += 1;
+    if (this.timestamps.length > 0) {
+      let keepFrom = 0;
+      while (keepFrom < this.timestamps.length && this.timestamps[keepFrom] <= cutoff) {
+        keepFrom += 1;
+      }
+      if (keepFrom > 0) this.timestamps = this.timestamps.slice(keepFrom);
     }
-    if (keepFrom > 0) this.timestamps = this.timestamps.slice(keepFrom);
+
+    // A rate limit costs allowance; a quiet minute earns one request back.
+    if (this.allowance < this.rpm && now - this.lastShrinkAt >= 60_000) {
+      this.allowance = Math.min(this.rpm, this.allowance + 1);
+      this.lastShrinkAt = now;
+    }
   }
 
   private limitFor(priority: Priority): number {
     if (priority === "background") {
-      return Math.max(1, this.rpm - this.reserve);
+      return Math.max(1, this.allowance - this.reserve);
     }
-    return this.rpm;
+    return this.allowance;
   }
 
   private inFlightCapFor(priority: Priority): number {
@@ -65,11 +81,20 @@ export class AiRateLimiter {
   }
 
   /**
-   * Pause every lane for a while. Used when the provider answers 429 so the
-   * whole account backs off together instead of hammering the rate limit.
+   * Pause every lane for a while and shrink the ceiling. Used when the provider
+   * answers 429: the whole account backs off together instead of hammering the
+   * rate limit, and future traffic stays under whatever the real limit turns
+   * out to be. The allowance recovers on its own after quiet minutes.
    */
   penalize(ms: number): void {
-    this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.max(0, ms));
+    const now = Date.now();
+    this.blockedUntil = Math.max(this.blockedUntil, now + Math.max(0, ms));
+    // In-flight requests can 429 together; shrink once per short window so a
+    // single storm finds the real ceiling instead of collapsing to the floor.
+    if (now - this.lastShrinkAt >= 5_000) {
+      this.allowance = Math.max(4, Math.floor(this.allowance * 0.75));
+      this.lastShrinkAt = now;
+    }
   }
 
   /** Resolves with a release function once a request slot is available. */
@@ -114,6 +139,7 @@ export class AiRateLimiter {
     this.prune(Date.now());
     return {
       rpm: this.rpm,
+      allowance: this.allowance,
       usedThisMinute: this.timestamps.length,
       inFlight: this.running.interactive + this.running.background,
       inFlightByLane: { ...this.running },

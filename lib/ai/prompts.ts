@@ -55,7 +55,7 @@ export function mapUser(params: {
 }): string {
   return `Lecture: ${params.title}
 Primary language: ${params.language}
-Window: ${formatClock(params.windowStart)} to ${formatClock(params.windowEnd)}
+Window: ${formatClock(params.windowStart)} to ${formatClock(params.windowEnd)} (${params.windowStart}–${params.windowEnd} seconds)
 
 Transcript:
 ${params.transcript}`;
@@ -67,14 +67,17 @@ You receive a list of timestamped topics extracted from one YouTube lecture and 
 ${JSON_RULES}
 Shape: {"level":"Beginner"|"Intermediate"|"Advanced","modules":[{"title":string,"summary":string,"start":number,"end":number,"lessons":[{"title":string,"summary":string,"start":number,"end":number}]}]}
 Rules for the structure:
-- 3 to 8 modules, each with 2 to 4 lessons. Lessons are 4 to 20 minutes of video.
+- Modules scale with the lecture: roughly one module per 45–75 minutes of a long video (a short video gets one or two). Do not pack a whole lecture into a fixed handful of modules.
+- Keep each module at least ~20 minutes long (except a brief tail at the very end): only a module that long can carry four five-minute lessons. Merge adjacent thin topics instead of shipping a small module.
+- Every module has at least 4 lessons — a module too brief to fit four is the only exception. Lessons are 5 to 20 minutes of video, so a longer module carries more lessons rather than longer ones.
 - The outline must cover the WHOLE video: the first module starts at second 0, the last module ends at the "Length" given in the prompt, and every module ends where the next one begins.
 - A long lecture needs more modules, not fewer. Spread the timestamped topics across the full runtime instead of describing only the opening.
-- If the description lists chapters, use them as the spine: every chapter belongs to a module.
+- Chapters (when the prompt lists them) are a hint, not a mandate: follow a chapter boundary where the timestamped topics agree, split or merge chapters where the transcript shows a better boundary. Every chapter lands inside some module — never one module per chapter by reflex.
 - Module and lesson ranges must tile the video in order and must not overlap.
 - A module title describes a skill ("Functions and scope"), not a timestamp.
-- Keep the module count low enough that the course is finishable; merge thin topics.
-- Lessons must line up with where the content actually appears in the timestamped topics.`;
+- Merge thin topics into a neighbouring lesson instead of padding a module with one-minute lessons.
+- Lessons must line up with where the content actually appears in the timestamped topics.
+- The whole outline is ONE JSON answer capped near 16 000 tokens: keep titles to 8 words or fewer, module summaries to 12 words or fewer, lesson summaries to 6 words or fewer. Prose beyond that truncates the answer and ruins the build.`;
 }
 
 export function outlineUser(params: {
@@ -83,6 +86,7 @@ export function outlineUser(params: {
   language: string;
   duration: number;
   description: string;
+  chapters: { start: number; title: string }[];
   topics: { title: string; start: number; end: number; points: string[] }[];
 }): string {
   return `Lecture: ${params.title}
@@ -93,6 +97,13 @@ Language: ${params.language}
 Description:
 ${params.description || "(no description)"}
 
+Chapters (from the description):
+${
+  params.chapters.length > 0
+    ? params.chapters.map((chapter) => `- ${formatClock(chapter.start)} ${chapter.title}`).join("\n")
+    : "(none listed)"
+}
+
 Timestamped topics:
 ${params.topics
   .map(
@@ -101,7 +112,7 @@ ${params.topics
   )
   .join("\n")}
 
-Build the course over the full ${formatClock(params.duration)}. The last module must end at ${params.duration} seconds, not where the topics happen to stop.`;
+Build the course over the full ${formatClock(params.duration)}. The last module must end at ${params.duration} seconds, not where the topics happen to stop. The chapters are a hint — you decide the final module and lesson boundaries from the timestamped topics. Stay terse: a lesson summary of at most 6 words.`;
 }
 
 /**

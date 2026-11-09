@@ -4,6 +4,17 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { AiError, nimJson } from "@/lib/ai/nim";
 import {
+  coverageSlack,
+  MAX_LESSONS_PER_MODULE,
+  MIN_LESSONS_PER_MODULE,
+  LESSON_MAX_SECONDS,
+  LESSON_MIN_SECONDS,
+  normaliseOutline,
+  type Outline,
+  type OutlineLesson,
+  type OutlineModule,
+} from "@/lib/ai/outline";
+import {
   detectLanguage,
   lessonSystem,
   lessonUser,
@@ -25,15 +36,6 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { CodeExercise, KeyTerm, Mcq, NoteBlock, ShortAnswer } from "@/lib/types";
 
 type MappedSegment = { title: string; start: number; end: number; points: string[] };
-type OutlineLesson = { title: string; summary: string; start: number; end: number };
-type OutlineModule = {
-  title: string;
-  summary: string;
-  start: number;
-  end: number;
-  lessons: OutlineLesson[];
-};
-type Outline = { level: string; modules: OutlineModule[] };
 
 type GeneratedLesson = {
   title: string;
@@ -49,6 +51,18 @@ type GeneratedLesson = {
 
 type CheckKind = "mcq" | "short" | "code";
 
+/**
+ * The persisted timeline failed to tile the video. `ready` must never ship
+ * this state, so the build fails instead — a stale-row mix from a resumed
+ * attempt once reached `ready` at 128 % coverage.
+ */
+class CoverageError extends Error {
+  constructor(detail: string) {
+    super(`Course coverage check failed: ${detail}`);
+    this.name = "CoverageError";
+  }
+}
+
 /** One assessment the planner asked for, before anything is written. */
 type PlannedCheck = { kind: CheckKind; form: string; focus: string };
 type LessonPlan = { title: string; checks: PlannedCheck[] };
@@ -57,19 +71,14 @@ type ModulePlan = LessonPlan[];
 /** The database stores one exercise kind per row, so the plan cannot exceed this. */
 const CHECK_LIMITS: Record<CheckKind, number> = { mcq: 3, short: 1, code: 2 };
 
-const MAX_WINDOWS = 16;
-const MIN_WINDOW_SECONDS = 8 * 60;
-
-/** Shortest lesson worth writing exercises for. */
-const MIN_LESSON_SECONDS = 90;
-
 /**
- * How far the last lesson may stop short of the end of the video before the
- * outline counts as incomplete. A 3.5 hour lecture gets ~6 minutes of slack.
+ * Transcript windows are a fixed 20 minutes, so a long video maps in more
+ * calls instead of cramming hours into one window. A 20-minute window stays
+ * comfortably inside the 40 000-char slice the map prompt can read.
  */
-function coverageSlack(duration: number): number {
-  return Math.max(180, Math.round(duration * 0.02));
-}
+const MAX_WINDOW_SECONDS = 20 * 60;
+/** Defensive ceiling (~80 hours of video) so an absurd runtime cannot queue hundreds of calls. */
+const MAX_WINDOWS = 240;
 
 function text(value: unknown, fallback = "", max = 4_000): string {
   if (typeof value !== "string") return fallback;
@@ -91,8 +100,20 @@ function list<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
-function validateSegments(value: unknown): MappedSegment[] | null {
+/**
+ * Keeps a window's segments inside that window. The bounds check matters: a
+ * model that misreads the transcript clock returns plausible-looking absolute
+ * timestamps for the wrong part of the video, and without this guard those
+ * segments scatter across (or fall off) the timeline, leaving hour-sized
+ * holes the outline then skips.
+ */
+function validateSegments(
+  value: unknown,
+  windowStart: number,
+  windowEnd: number,
+): MappedSegment[] | null {
   const root = value as { segments?: unknown } | null;
+  const slack = 60;
   const segments = list<Record<string, unknown>>(root?.segments)
     .map((segment) => ({
       title: text(segment.title, "", 160),
@@ -103,79 +124,17 @@ function validateSegments(value: unknown): MappedSegment[] | null {
         .filter(Boolean)
         .slice(0, 4),
     }))
-    .filter((segment) => segment.title && segment.points.length > 0)
+    .filter(
+      (segment) =>
+        segment.title &&
+        segment.points.length > 0 &&
+        segment.end > segment.start &&
+        segment.start >= windowStart - slack &&
+        segment.end <= windowEnd + slack,
+    )
     .sort((a, b) => a.start - b.start);
 
   return segments.length > 0 ? segments : null;
-}
-
-/**
- * Turns the model's lesson timestamps into contiguous slices of the module.
- * Overlapping lessons were the old failure mode: two lessons claiming the same
- * minute made the player jump backwards and the progress bar lie.
- */
-function tileLessons(
-  lessons: OutlineLesson[],
-  start: number,
-  end: number,
-): OutlineLesson[] {
-  const span = end - start;
-  if (span < MIN_LESSON_SECONDS) return [];
-
-  const maxLessons = Math.max(1, Math.min(4, Math.floor(span / MIN_LESSON_SECONDS)));
-  const picks = lessons.slice(0, maxLessons);
-  let bounds: number[] = [start];
-
-  for (let index = 1; index < picks.length; index += 1) {
-    const previous = bounds[bounds.length - 1];
-    // Leave room for the lessons that still need a slot after this boundary.
-    const latest = end - (picks.length - index) * MIN_LESSON_SECONDS;
-    const proposed = Math.round(picks[index].start);
-    if (proposed <= previous || proposed >= latest) {
-      bounds = [];
-      break;
-    }
-    bounds.push(proposed);
-  }
-
-  // The model's boundaries did not fit the range: slice it evenly instead.
-  if (bounds.length === 0) {
-    bounds = picks.map((_, index) => Math.round(start + (span * index) / picks.length));
-  }
-  bounds.push(end);
-
-  return picks.map((lesson, index) => ({
-    ...lesson,
-    start: bounds[index],
-    end: bounds[index + 1],
-  }));
-}
-
-/**
- * Lays the outline over one continuous timeline: modules start where the
- * previous one ended, lessons cover their module with no gaps and no overlaps.
- * It never stretches a module to the end of the video — that would hide an
- * outline that stopped early.
- */
-function normaliseOutline(modules: OutlineModule[], duration: number): OutlineModule[] {
-  const limit = duration > 0 ? duration : (modules.at(-1)?.end ?? 0);
-  const result: OutlineModule[] = [];
-  let cursor = 0;
-
-  for (const entry of modules) {
-    if (limit > 0 && cursor >= limit) break;
-
-    const start = cursor;
-    const wanted = Math.max(entry.end, entry.start, start + 300);
-    const end = limit > 0 ? Math.min(wanted, limit) : wanted;
-    const lessons = tileLessons(entry.lessons, start, end);
-    if (lessons.length === 0) continue;
-
-    result.push({ ...entry, start, end, lessons });
-    cursor = end;
-  }
-
-  return result;
 }
 
 function validateOutline(duration: number): (value: unknown) => Outline | null {
@@ -191,7 +150,7 @@ function validateOutline(duration: number): (value: unknown) => Outline | null {
             end: int(lesson.end),
           }))
           .filter((lesson) => lesson.title && lesson.end > lesson.start)
-          .slice(0, 4);
+          .slice(0, MAX_LESSONS_PER_MODULE);
 
         return {
           title: text(module.title, `Module ${index + 1}`, 140),
@@ -201,18 +160,43 @@ function validateOutline(duration: number): (value: unknown) => Outline | null {
           lessons,
         };
       })
-      .filter((module) => module.lessons.length > 0)
-      .slice(0, 8);
+      // Modules scale with the lecture; only empty ones are dropped. The
+      // timeline normalisation below caps how many can actually tile the run.
+      .filter((module) => module.lessons.length > 0);
 
-    if (modules.length === 0) return null;
+    if (modules.length === 0) {
+      console.warn("[generation] outline rejected: no module carried a usable lesson");
+      return null;
+    }
 
     // An outline that stops a third of the way in used to be accepted, so the
     // course was marked ready while most of the lecture had no lessons at all.
     const reached = Math.max(...modules.map((module) => Math.max(module.end, module.start)));
-    if (duration > 0 && reached < duration - coverageSlack(duration)) return null;
+    if (duration > 0 && reached < duration - coverageSlack(duration)) {
+      console.warn(`[generation] outline rejected: reached ${reached}s of ${duration}s`);
+      return null;
+    }
 
     const normalised = normaliseOutline(modules, duration);
-    if (normalised.length === 0) return null;
+    if (normalised.length === 0) {
+      console.warn("[generation] outline rejected: nothing survived normalisation");
+      return null;
+    }
+
+    // A module with one or two lessons is not a module. Reject so the repair
+    // pass can add lessons; only a module too short to fit four five-minute
+    // sections escapes — normaliseOutline has merged every other thin module.
+    const underweight = normalised.find(
+      (module) =>
+        module.lessons.length < MIN_LESSONS_PER_MODULE &&
+        module.end - module.start >= MIN_LESSONS_PER_MODULE * LESSON_MIN_SECONDS,
+    );
+    if (underweight) {
+      console.warn(
+        `[generation] outline rejected: "${underweight.title}" has ${underweight.lessons.length} lessons for ${underweight.end - underweight.start}s`,
+      );
+      return null;
+    }
 
     return {
       level: ["Beginner", "Intermediate", "Advanced"].includes(String(root?.level))
@@ -238,17 +222,27 @@ function outlineFromTopics(segments: MappedSegment[], duration: number): Outline
   const span = duration > 0 ? duration : (segments.at(-1)?.end ?? 0);
   if (span <= 0) return { level: "Intermediate", modules: [] };
 
-  const moduleCount = Math.min(8, Math.max(2, Math.ceil(span / (24 * 60))));
+  // Modules scale with the runtime (~one per hour of a long lecture) and each
+  // carries at least four lessons, so the fallback obeys the same shape rule
+  // the prompt asks of the model.
+  const moduleCount = Math.max(2, Math.ceil(span / (60 * 60)));
   const moduleSpan = span / moduleCount;
   const modules: OutlineModule[] = [];
+  let skipped = 0;
 
   for (let index = 0; index < moduleCount; index += 1) {
     const start = Math.round(index * moduleSpan);
     const end = index === moduleCount - 1 ? Math.round(span) : Math.round((index + 1) * moduleSpan);
     const inside = segments.filter((segment) => segment.start >= start && segment.start < end);
-    if (inside.length === 0) continue;
+    if (inside.length === 0) {
+      skipped += 1;
+      continue;
+    }
 
-    const lessonCount = Math.min(4, Math.max(2, Math.ceil(inside.length / 2)));
+    const lessonCount = Math.min(
+      Math.max(MIN_LESSONS_PER_MODULE, Math.round((end - start) / (15 * 60))),
+      Math.max(1, Math.floor((end - start) / LESSON_MIN_SECONDS)),
+    );
     const lessonSpan = (end - start) / lessonCount;
     const lessons: OutlineLesson[] = [];
 
@@ -278,6 +272,23 @@ function outlineFromTopics(segments: MappedSegment[], duration: number): Outline
       end,
       lessons,
     });
+  }
+
+  // A tail the topic map never reached (a window whose segments scattered off
+  // the timeline) still has to be covered: the duration is authoritative, and
+  // shipping a course that stops at 48 of its 70 hours is the bug this guards
+  // against. normaliseOutline re-tiles the last module's lessons over it.
+  if (skipped > 0) {
+    console.warn(
+      `[generation] topic map has no segments in ${skipped} of ${moduleCount} time buckets`,
+    );
+  }
+  const last = modules.at(-1);
+  if (last && last.end < span) {
+    console.warn(
+      `[generation] topic map stops at ${last.end}s of ${span}s — extending the last module to cover the tail`,
+    );
+    last.end = span;
   }
 
   return { level: "Intermediate", modules: normaliseOutline(modules, span) };
@@ -448,9 +459,16 @@ function validateLessonContent(
 }
 
 function buildWindows(cues: TranscriptCue[], duration: number) {
+  // Fixed 20-minute windows: longer videos map in more windows, not bigger
+  // ones, so each map call reads a transcript slice that always fits the
+  // prompt. Only beyond ~80 hours does the safety cap stretch a window.
+  const count = Math.min(
+    MAX_WINDOWS,
+    Math.max(1, Math.ceil(duration / MAX_WINDOW_SECONDS)),
+  );
   const targetSeconds = Math.max(
-    MIN_WINDOW_SECONDS,
-    Math.ceil(duration / MAX_WINDOWS / 60) * 60,
+    MAX_WINDOW_SECONDS,
+    Math.ceil(duration / count / 60) * 60,
   );
 
   const windows = new Map<number, TranscriptCue[]>();
@@ -493,6 +511,9 @@ async function setStatus(
 
 function friendlyError(error: unknown): string {
   if (error instanceof TranscriptError) return error.message;
+  if (error instanceof CoverageError) {
+    return "The course sections do not tile the whole video. Try again — the outline will be rebuilt.";
+  }
   if (error instanceof AiError) {
     if (error.status === 429) {
       return "The model provider is rate-limiting course builds right now. Wait a minute, then try again.";
@@ -504,6 +525,111 @@ function friendlyError(error: unknown): string {
   }
   // Anything else is an internal detail (SQL constraint names, module paths).
   return "Something went wrong while building this course. Try again.";
+}
+
+/**
+ * The final gate before `ready`: the rows actually stored in the database must
+ * tile the video — modules contiguous from second 0 to the exact duration,
+ * every module fully covered by contiguous sections carrying four lessons
+ * wherever four fit, and every section watching for 5–20 minutes (the hard
+ * rule; waived only for a video shorter than five minutes). A resumed build
+ * that mixed rows from two outlines once reached `ready` at 128 % coverage;
+ * this check turns that into a failure the student can retry (the resume
+ * logic then rewrites the mismatched rows).
+ */
+async function assertCompleteCoverage(
+  admin: SupabaseClient,
+  courseId: string,
+  duration: number,
+): Promise<void> {
+  const [{ data: modules, error: moduleError }, { data: lessons, error: lessonError }] =
+    await Promise.all([
+      admin
+        .from("modules")
+        .select("id,position,start_seconds,end_seconds")
+        .eq("course_id", courseId)
+        .order("position"),
+      admin
+        .from("lessons")
+        .select("id,module_id,position,start_seconds,end_seconds")
+        .eq("course_id", courseId),
+    ]);
+
+  if (moduleError || lessonError) {
+    throw new CoverageError(`could not read rows: ${moduleError?.message ?? lessonError?.message ?? ""}`);
+  }
+  if (!modules || modules.length === 0) throw new CoverageError("no modules were saved");
+
+  let cursor = 0;
+  for (const [index, row] of modules.entries()) {
+    if (row.position !== index) throw new CoverageError(`module positions skip ${index}`);
+    if (row.start_seconds !== cursor) {
+      throw new CoverageError(
+        row.start_seconds > cursor
+          ? `gap of ${row.start_seconds - cursor}s before module ${index + 1}`
+          : `modules ${index + 1} and ${index + 2} overlap by ${cursor - row.start_seconds}s`,
+      );
+    }
+    if (row.end_seconds <= row.start_seconds) throw new CoverageError(`module ${index + 1} is empty`);
+    cursor = row.end_seconds;
+  }
+  if (duration > 0 && cursor !== duration) {
+    throw new CoverageError(
+      cursor < duration
+        ? `coverage stops ${duration - cursor}s early (${cursor}s of ${duration}s)`
+        : `coverage overruns the video by ${cursor - duration}s`,
+    );
+  }
+
+  const byModule = new Map<string, { position: number; start_seconds: number; end_seconds: number }[]>();
+  for (const lesson of lessons ?? []) {
+    const rows = byModule.get(lesson.module_id) ?? [];
+    rows.push(lesson);
+    byModule.set(lesson.module_id, rows);
+  }
+
+  for (const [index, row] of modules.entries()) {
+    const rows = (byModule.get(row.id) ?? []).sort((a, b) => a.position - b.position);
+    if (rows.length === 0) throw new CoverageError(`module ${index + 1} has no sections`);
+    if (
+      rows.length < MIN_LESSONS_PER_MODULE &&
+      row.end_seconds - row.start_seconds >= MIN_LESSONS_PER_MODULE * LESSON_MIN_SECONDS
+    ) {
+      throw new CoverageError(
+        `module ${index + 1} has ${rows.length} sections for ${row.end_seconds - row.start_seconds}s`,
+      );
+    }
+
+    let sectionCursor = row.start_seconds;
+    for (const [position, lesson] of rows.entries()) {
+      if (lesson.position !== position) throw new CoverageError(`module ${index + 1} skips section ${position}`);
+      if (lesson.start_seconds !== sectionCursor) {
+        throw new CoverageError(
+          lesson.start_seconds > sectionCursor
+            ? `gap of ${lesson.start_seconds - sectionCursor}s inside module ${index + 1}`
+            : `sections ${position + 1} and ${position + 2} of module ${index + 1} overlap`,
+        );
+      }
+      if (lesson.end_seconds > row.end_seconds) {
+        throw new CoverageError(`section ${position + 1} of module ${index + 1} runs past the module`);
+      }
+      const watched = lesson.end_seconds - lesson.start_seconds;
+      if (
+        duration >= LESSON_MIN_SECONDS &&
+        (watched < LESSON_MIN_SECONDS || watched > LESSON_MAX_SECONDS)
+      ) {
+        throw new CoverageError(
+          `section ${position + 1} of module ${index + 1} watches for ${watched}s — outside the 5–20 minute rule`,
+        );
+      }
+      sectionCursor = lesson.end_seconds;
+    }
+    if (sectionCursor !== row.end_seconds) {
+      throw new CoverageError(
+        `module ${index + 1} ends ${row.end_seconds - sectionCursor}s after its last section`,
+      );
+    }
+  }
 }
 
 async function persistLesson(params: {
@@ -666,7 +792,8 @@ export async function runCourseGeneration(params: {
             maxTokens: 2_500,
             priority: "background",
             meta: { kind: "map", userId, courseId },
-            validate: validateSegments,
+            validate: (value) => validateSegments(value, window.start, window.end),
+            repairHint: `Timestamps must be absolute seconds from the start of the video and fall inside the window ${window.start}–${window.end} (the transcript clock is [h:mm:ss] — hours×3600 + minutes×60 + seconds).`,
           });
 
           mapped += 1;
@@ -687,7 +814,26 @@ export async function runCourseGeneration(params: {
       throw new Error("The transcript did not contain enough spoken content to outline.");
     }
 
+    // The outline is ONE JSON object: ~55 tokens per module and ~40 per
+    // lesson (now that summaries are terse). At one module per hour and a
+    // lesson per ten minutes, a video past ~54 hours needs more than the
+    // model's 16 384-token ceiling — every round then comes back truncated
+    // and unparseable (evidence: completion tokens pinned exactly at the cap
+    // for a 70 h course), burning four calls before the fallback anyway.
+    const outlineBudget = clamp(2_500 + Math.ceil(duration / LESSON_MIN_SECONDS) * 45, 6_000, 16_000);
+    const moduleEstimate = Math.max(1, Math.ceil(duration / (60 * 60)));
+    const lessonEstimate = Math.max(moduleEstimate * MIN_LESSONS_PER_MODULE, Math.ceil(duration / (10 * 60)));
+    const outlineTokensEstimate = moduleEstimate * 55 + lessonEstimate * 40;
+
     let outline = await (async () => {
+      if (outlineTokensEstimate > outlineBudget) {
+        console.warn(
+          `[generation] outline for ${courseId} would need ~${outlineTokensEstimate} tokens (budget ${outlineBudget}); using the topic map`,
+        );
+        const fallback = outlineFromTopics(segments, duration);
+        if (fallback.modules.length > 0) return fallback;
+      }
+
       try {
         return await nimJson<Outline>({
           system: outlineSystem(),
@@ -697,20 +843,25 @@ export async function runCourseGeneration(params: {
             language,
             duration,
             description: lecture.description,
+            chapters: lecture.chapters,
             topics: segments,
           }),
-          // Real outlines were reaching 3_625 of a 4_000 cap; headroom here
-          // avoids a truncation-driven repair on a 3+ hour lecture.
-          maxTokens: 6_000,
+          // The outline JSON grows with the module and lesson count, which now
+          // scales with the runtime. Thinking is off, so the budget is all
+          // answer — capped just under the model's 16 384-token ceiling. Videos
+          // whose outline cannot fit that cap are skipped above.
+          maxTokens: outlineBudget,
           priority: "background",
           meta: { kind: "outline", userId, courseId },
           validate: validateOutline(duration),
-          repairHint: `The previous outline stopped before the end of the lecture. The video is ${duration} seconds long, so the last module must end at ${duration} and the modules must tile the whole runtime with no gaps.`,
+          repairHint: `The previous outline was rejected. Every module needs at least ${MIN_LESSONS_PER_MODULE} lessons — if a module is too small to hold four, merge it into a neighbouring module instead (only the video's brief tail may be shorter). Every lesson must run 5 to 20 minutes of video. The modules must also tile the whole lecture with no gaps: the first starts at second 0, each ends where the next begins, and the last ends at ${duration}.`,
         });
       } catch (error) {
         // Better a plain timeline from the topic map than a course that silently
         // covers a fraction of the lecture.
-        console.warn(`[generation] outline did not cover ${courseId}; using the topic map`);
+        console.warn(
+          `[generation] outline failed for ${courseId}: ${error instanceof Error ? error.message : String(error)}; using the topic map`,
+        );
         const fallback = outlineFromTopics(segments, duration);
         if (fallback.modules.length === 0) throw error;
         return fallback;
@@ -773,12 +924,31 @@ export async function runCourseGeneration(params: {
     // Module rows are cheap and stable: create them first so each section can
     // be written (and resumed) on its own.
     const [{ data: existingModules }, { data: existingLessons }] = await Promise.all([
-      admin.from("modules").select("id,position").eq("course_id", courseId),
-      admin.from("lessons").select("id,module_id,position").eq("course_id", courseId),
+      admin.from("modules").select("id,position,start_seconds,end_seconds").eq("course_id", courseId),
+      admin.from("lessons")
+        .select("id,module_id,position,start_seconds,end_seconds")
+        .eq("course_id", courseId),
     ]);
 
+    // A row is only worth keeping when it describes the SAME slice of video as
+    // the regenerated outline. Matching by position alone spliced rows from two
+    // different outlines together: a retry kept the old modules (built by the
+    // broken fallback, ending at 175 809 s) while the new ones started at
+    // 104 050 s, and the course still reached `ready` at 128 % coverage.
+    const reusableModule = (row: { position: number; start_seconds: number; end_seconds: number }, index: number) => {
+      const planned = outline.modules[index];
+      return (
+        planned !== undefined &&
+        row.position === index &&
+        row.start_seconds === planned.start &&
+        row.end_seconds === planned.end
+      );
+    };
+
+    // Everything else is stale — deleting a module cascades to its lessons and
+    // their exercises, so old content can never survive a rebuilt timeline.
     const staleModuleIds = (existingModules ?? [])
-      .filter((row) => row.position >= outline.modules.length)
+      .filter((row) => !reusableModule(row, row.position))
       .map((row) => row.id);
     if (staleModuleIds.length > 0) {
       await admin.from("modules").delete().in("id", staleModuleIds);
@@ -786,7 +956,7 @@ export async function runCourseGeneration(params: {
 
     const moduleIds: string[] = [];
     for (const [index, module] of outline.modules.entries()) {
-      const existing = (existingModules ?? []).find((row) => row.position === index);
+      const existing = (existingModules ?? []).find((row) => reusableModule(row, index));
       if (existing) {
         moduleIds.push(existing.id);
         continue;
@@ -812,13 +982,17 @@ export async function runCourseGeneration(params: {
     }
 
     // Sections that no longer exist in the outline (or belong to a module that
-    // was dropped) would show up as orphans in the player.
+    // was dropped) would show up as orphans in the player. A section whose
+    // window moved is just as stale as a missing one: its notes were written
+    // for different minutes of the lecture.
     const modulePosition = new Map(moduleIds.map((id, index) => [id, index]));
     const staleLessonIds = (existingLessons ?? [])
       .filter((row) => {
         const index = modulePosition.get(row.module_id);
         if (index === undefined) return true;
-        return row.position >= outline.modules[index].lessons.length;
+        const lesson = outline.modules[index].lessons[row.position];
+        if (lesson === undefined) return true;
+        return row.start_seconds !== lesson.start || row.end_seconds !== lesson.end;
       })
       .map((row) => row.id);
     if (staleLessonIds.length > 0) {
@@ -844,14 +1018,33 @@ export async function runCourseGeneration(params: {
       });
     }
 
-    await setStatus(admin, courseId, {
-      stage: `Writing ${written} of ${totalLessons} sections`,
-    });
+    // Sections still owed per module: a chapter counts as written the moment
+    // its last missing section lands. Modules an earlier attempt already
+    // finished start at zero and are counted right away.
+    const pendingPerModule = outline.modules.map((module, index) =>
+      module.lessons.filter(
+        (_, lessonIndex) => !alreadyWritten.has(`${moduleIds[index]}:${lessonIndex}`),
+      ).length,
+    );
+    let chaptersWritten = pendingPerModule.filter((count) => count === 0).length;
+    const stageLine = () =>
+      `Writing ${written} of ${totalLessons} sections · ${chaptersWritten} of ${outline.modules.length} chapters written`;
+
+    await setStatus(admin, courseId, { stage: stageLine() });
 
     // One call per section: a section's notes, diagram and exercises are long,
     // and packing a whole module into one response used to hit the token cap
     // and come back repaired or truncated.
     const jobs: Promise<void>[] = [];
+
+    // The calls run concurrently — the rate limiter already paces them — but
+    // each section is only released (saved and counted) once every earlier
+    // section of the outline has been. The database therefore always holds a
+    // contiguous prefix of the outline: a student reading mid-build sees
+    // section 1, 2, 3 … instead of chapter 50 landing before chapter 3.
+    // The gate opens even when a section fails, so one bad section can never
+    // strand the rest of the build behind it.
+    let released = Promise.resolve();
 
     for (const [index, module] of outline.modules.entries()) {
       const moduleId = moduleIds[index];
@@ -859,63 +1052,81 @@ export async function runCourseGeneration(params: {
       module.lessons.forEach((lesson, lessonIndex) => {
         if (alreadyWritten.has(`${moduleId}:${lessonIndex}`)) return;
 
+        const predecessor = released;
+        let release!: () => void;
+        released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+
         jobs.push(
           (async () => {
-            // Only this module's plan gates these sections: the lesson call
-            // starts the moment its own plan lands, not after every module.
-            const checks =
-              (await plans[index])?.[lessonIndex]?.checks ?? defaultChecks(lesson);
+            try {
+              // Only this module's plan gates these sections: the lesson call
+              // starts the moment its own plan lands, not after every module.
+              const checks =
+                (await plans[index])?.[lessonIndex]?.checks ?? defaultChecks(lesson);
 
-            const transcript = transcriptLines(
-              cuesBetween(lecture.cues, lesson.start, lesson.end),
-            ).slice(0, 24_000);
+              const transcript = transcriptLines(
+                cuesBetween(lecture.cues, lesson.start, lesson.end),
+              ).slice(0, 24_000);
 
-            const generated = await nimJson<GeneratedLesson>({
-              system: lessonSystem(),
-              user: lessonUser({
-                courseTitle: lecture.title,
+              // Waiting for the earlier sections overlaps this section's own
+              // model call, so ordering the arrival costs no build time.
+              const [generated] = await Promise.all([
+                nimJson<GeneratedLesson>({
+                  system: lessonSystem(),
+                  user: lessonUser({
+                    courseTitle: lecture.title,
+                    language,
+                    moduleTitle: module.title,
+                    moduleSummary: module.summary,
+                    lessonTitle: lesson.title,
+                    lessonSummary: lesson.summary,
+                    lessonStart: lesson.start,
+                    lessonEnd: lesson.end,
+                    plan: checks,
+                    transcript,
+                  }),
+                  maxTokens: 5_000,
+                  priority: "background",
+                  meta: { kind: "lesson", userId, courseId },
+                  validate: validateLessonContent(lesson, checks, language),
+                  repairHint:
+                    "Notes need at least two blocks, each with a heading and 120 or more characters of Markdown prose. The exercises must match the assignment plan one for one.",
+                }),
+                predecessor,
+              ]);
+
+              if (aborted) return;
+
+              await persistLesson({
+                admin,
+                courseId,
+                moduleId,
+                position: lessonIndex,
+                outline: lesson,
+                generated,
                 language,
-                moduleTitle: module.title,
-                moduleSummary: module.summary,
-                lessonTitle: lesson.title,
-                lessonSummary: lesson.summary,
-                lessonStart: lesson.start,
-                lessonEnd: lesson.end,
-                plan: checks,
-                transcript,
-              }),
-              maxTokens: 5_000,
-              priority: "background",
-              meta: { kind: "lesson", userId, courseId },
-              validate: validateLessonContent(lesson, checks, language),
-              repairHint:
-                "Notes need at least two blocks, each with a heading and 120 or more characters of Markdown prose. The exercises must match the assignment plan one for one.",
-            });
+              });
 
-            if (aborted) return;
-
-            // Persist as soon as the section returns: a 429 late in the build
-            // then costs one section instead of the whole course.
-            await persistLesson({
-              admin,
-              courseId,
-              moduleId,
-              position: lessonIndex,
-              outline: lesson,
-              generated,
-              language,
-            });
-
-            written += 1;
-            await setStatus(admin, courseId, {
-              stage: `Writing ${written} of ${totalLessons} sections`,
-            });
+              written += 1;
+              pendingPerModule[index] -= 1;
+              if (pendingPerModule[index] === 0) chaptersWritten += 1;
+              await setStatus(admin, courseId, { stage: stageLine() });
+            } finally {
+              release();
+            }
           })(),
         );
       });
     }
 
     await Promise.all(jobs);
+
+    // Nothing may ship as `ready` unless the rows in the database tile the
+    // whole video — the in-memory outline already does, but a resumed attempt
+    // can leave stale rows behind it.
+    await assertCompleteCoverage(admin, courseId, duration);
 
     await setStatus(admin, courseId, {
       status: "ready",

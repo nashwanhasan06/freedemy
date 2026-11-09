@@ -12,11 +12,22 @@ export type TranscriptCue = {
   text: string;
 };
 
+/** One "0:00 Title" line from the video description's chapter list. */
+export type Chapter = {
+  start: number;
+  title: string;
+};
+
 export type Lecture = {
   videoId: string;
   title: string;
   channel: string;
   description: string;
+  /**
+   * Chapter markers parsed from the *full* description, before the 4 000-char
+   * slice above. The outline treats them as a hint — see `outlineSystem`.
+   */
+  chapters: Chapter[];
   durationSeconds: number;
   cues: TranscriptCue[];
 };
@@ -100,6 +111,51 @@ function isMissingBinary(error: unknown): boolean {
  * (or YTDLP_PATH). Returns null when the binary is not installed so the caller
  * can try the direct caption endpoint instead.
  */
+/**
+ * Matches `0:00 Title`, `1:02:03 Title`, optionally bulleted or dash-separated.
+ * The timestamp must be followed by whitespace or a separator, never digits.
+ */
+const CHAPTER_LINE =
+  /^\s*(?:[•‣◦·*\-–—>]+\s*)?(?:(\d{1,2}):)?(\d{1,3}):([0-5]\d)(?:\s*[-–—·|]\s*|\s+)(\S.*)$/;
+
+/**
+ * Pulls the chapter list YouTube writes into the description. Conservative on
+ * purpose: chapters must open near the start of the video and rise strictly,
+ * and only the first contiguous run counts — a prose timestamp ("we cover
+ * this at 10:30") or a duplicate line ends the scan instead of becoming a
+ * boundary the outline might trust.
+ */
+export function parseChapters(description: string): Chapter[] {
+  if (!description) return [];
+
+  const found: Chapter[] = [];
+  for (const line of description.split(/\r?\n/)) {
+    const match = CHAPTER_LINE.exec(line);
+    if (!match) {
+      if (found.length > 0) break;
+      continue;
+    }
+
+    const minutes = Number(match[2]);
+    const hours = match[1] ? Number(match[1]) : 0;
+    if (minutes > 59) continue;
+
+    const start = hours * 3600 + minutes * 60 + Number(match[3]);
+    if (found.length === 0) {
+      // Real chapter lists start at 0:00; anything later is prose.
+      if (start > 60) continue;
+    } else if (start <= found[found.length - 1].start) {
+      break;
+    }
+
+    const title = match[4].replace(/\s+/g, " ").trim().slice(0, 160);
+    if (!title) continue;
+    found.push({ start, title });
+  }
+
+  return found.length >= 3 ? found.slice(0, 100) : [];
+}
+
 async function loadWithYtDlp(videoId: string): Promise<Lecture | null> {
   const dir = await mkdtemp(join(tmpdir(), "freedemy-"));
 
@@ -197,11 +253,14 @@ async function loadWithYtDlp(videoId: string): Promise<Lecture | null> {
       info = { ...fallback, ...info };
     }
 
+    const description = info.description ?? "";
+
     return {
       videoId,
       title: info.title ?? "Untitled lecture",
       channel: info.uploader ?? info.channel ?? "YouTube",
-      description: (info.description ?? "").slice(0, 4_000),
+      description: description.slice(0, 4_000),
+      chapters: parseChapters(description),
       durationSeconds:
         Number(info.duration ?? 0) || (cues.at(-1)?.start ? cues.at(-1)!.start + 30 : 0),
       cues,
@@ -341,11 +400,14 @@ async function loadFromCaptionEndpoint(videoId: string): Promise<Lecture> {
     );
   }
 
+  const description = player.videoDetails?.shortDescription ?? "";
+
   return {
     videoId,
     title: player.videoDetails?.title ?? "Untitled lecture",
     channel: player.videoDetails?.author ?? "YouTube",
-    description: (player.videoDetails?.shortDescription ?? "").slice(0, 4_000),
+    description: description.slice(0, 4_000),
+    chapters: parseChapters(description),
     durationSeconds: Number(player.videoDetails?.lengthSeconds ?? 0) || 0,
     cues,
   };
@@ -376,13 +438,22 @@ export async function loadLecture(videoId: string): Promise<Lecture> {
   }
 }
 
-/** Compact timecoded transcript, one line per cue. */
+/**
+ * Compact timecoded transcript, one line per cue.
+ *
+ * The clock must be `[h:mm:ss]`, the format every other prompt uses. The old
+ * `[totalMinutes:SS]` form made the model misread deep timestamps on long
+ * lectures — a cue at 60 h printed as `[3600:00]` came back as `start: 3600`,
+ * so segments landed hours away from their window and the course silently
+ * lost the tail of the video.
+ */
 export function transcriptLines(cues: TranscriptCue[]): string {
   return cues
     .map((cue) => {
-      const minutes = Math.floor(cue.start / 60);
+      const hours = Math.floor(cue.start / 3600);
+      const minutes = Math.floor((cue.start % 3600) / 60);
       const seconds = cue.start % 60;
-      return `[${minutes}:${String(seconds).padStart(2, "0")}] ${cue.text}`;
+      return `[${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}] ${cue.text}`;
     })
     .join("\n");
 }

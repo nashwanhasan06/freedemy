@@ -19,6 +19,8 @@ export class AiError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    /** Server-provided Retry-After, milliseconds. */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "AiError";
@@ -41,6 +43,13 @@ type CallResult = {
 const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 /**
+ * Escalating cooldowns after a provider 429. The limit is account-wide and NIM
+ * rarely sends Retry-After, so each retry waits minutes rather than seconds —
+ * a long build must slow down instead of dying.
+ */
+const COOLDOWN_429_MS = [30_000, 60_000, 120_000, 180_000];
+
+/**
  * The NVIDIA Nemotron models answer through a hidden reasoning pass first. That
  * pass is billed against max_tokens, so a 1 200-token map call came back with
  * empty content and the whole course build failed. Thinking is turned off, and
@@ -52,7 +61,7 @@ function retryAfterMs(response: Response): number | null {
   const header = response.headers.get("retry-after");
   if (!header) return null;
   const seconds = Number(header);
-  if (Number.isFinite(seconds)) return Math.max(500, Math.min(30_000, seconds * 1000));
+  if (Number.isFinite(seconds)) return Math.max(500, Math.min(180_000, seconds * 1000));
   return null;
 }
 
@@ -86,107 +95,107 @@ async function callNim(
 ): Promise<CallResult> {
   assertNimConfigured();
 
-  return aiLimiter.run(priority, async () => {
-    let lastError: Error | null = null;
+  let jsonMode = json;
+  let lastError: Error | null = null;
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      if (attempt > 0) {
-        const backoff = Math.min(16_000, 1_500 * 2 ** attempt);
-        await new Promise((resolve) => setTimeout(resolve, backoff));
-      }
+  // One limiter slot per real HTTP request: a call that retries four times
+  // must cost four slots. Running the retry loop inside a single slot let a
+  // storming build burst at a multiple of the configured limit, which is how
+  // the account ended up rate-limited in the first place.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    let waitMs = 0;
+    let retry = false;
 
-      let response: Response;
-      try {
-        response = await fetch(`${NIM_BASE_URL}/chat/completions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${NIM_API_KEY}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            model: NIM_MODEL,
-            messages,
-            temperature: temperature ?? 0.2,
-            max_tokens: maxTokens ?? 2_048,
-            stream: false,
-            ...(sendThinkingFlag ? { chat_template_kwargs: { thinking: false } } : {}),
-            ...(json ? { response_format: { type: "json_object" } } : {}),
-          }),
-          // Large module generations routinely pass 180s on this model.
-          signal: AbortSignal.timeout(300_000),
-        });
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        continue;
-      }
-
-      if (!response.ok) {
-        const detail = await response.text().catch(() => "");
-        const error = new AiError(
-          `NVIDIA NIM returned ${response.status}: ${detail.slice(0, 400) || response.statusText}`,
-          response.status,
-        );
-
-        if (response.status === 400 && sendThinkingFlag && /chat_template_kwargs|thinking/i.test(detail)) {
-          sendThinkingFlag = false;
-          lastError = new AiError("The configured model does not take chat_template_kwargs.", 400);
-          continue;
+    try {
+      return await aiLimiter.run(priority, async () => {
+        let response: Response;
+        try {
+          response = await fetch(`${NIM_BASE_URL}/chat/completions`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${NIM_API_KEY}`,
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({
+              model: NIM_MODEL,
+              messages,
+              temperature: temperature ?? 0.2,
+              max_tokens: maxTokens ?? 2_048,
+              stream: false,
+              ...(sendThinkingFlag ? { chat_template_kwargs: { thinking: false } } : {}),
+              ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+            }),
+            // Large module generations routinely pass 180s on this model.
+            signal: AbortSignal.timeout(300_000),
+          });
+        } catch (error) {
+          throw new AiError(error instanceof Error ? error.message : String(error));
         }
 
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          throw new AiError(
+            `NVIDIA NIM returned ${response.status}: ${detail.slice(0, 400) || response.statusText}`,
+            response.status,
+            retryAfterMs(response) ?? undefined,
+          );
+        }
+
+        const payload = (await response.json()) as {
+          choices?: { message?: { content?: string } }[];
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
+
+        const content = payload.choices?.[0]?.message?.content?.trim();
+        if (!content) throw new AiError("The model returned an empty response.");
+
+        recordUsage(meta, payload.usage);
+        return { content, usage: payload.usage };
+      });
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const status = lastError instanceof AiError ? lastError.status : undefined;
+      const serverDelay = lastError instanceof AiError ? lastError.retryAfterMs : undefined;
+      const message = lastError.message;
+
+      if (status === undefined) {
+        // Transport failure or empty content: retry with the usual backoff.
+        retry = attempt < 4;
+        waitMs = Math.min(16_000, 1_500 * 2 ** (attempt + 1));
+      } else if (status === 400 && sendThinkingFlag && /chat_template_kwargs|thinking/i.test(message)) {
+        // The model rejects the thinking flag; switch it off for the process.
+        sendThinkingFlag = false;
+        retry = true;
+        waitMs = 1_500;
+      } else if (status === 400 && jsonMode && /response_format/i.test(message) && attempt < 3) {
         // Some NIM models reject response_format. Retry once without it rather
         // than failing the whole course build.
-        if (
-          response.status === 400 &&
-          json &&
-          detail.toLowerCase().includes("response_format") &&
-          attempt < 3
-        ) {
-          lastError = new AiError(
-            "The configured model rejected JSON mode; retrying without response_format.",
-            400,
-          );
-          json = false;
-          continue;
-        }
-
-        if (RETRYABLE.has(response.status) && attempt < 4) {
-          // A 429 is account-wide, so hold every lane (including background
-          // generation) instead of only this request. NIM usually omits
-          // Retry-After, hence the escalating fallback.
-          const wait =
-            response.status === 429
-              ? (retryAfterMs(response) ?? Math.min(60_000, 15_000 * 2 ** attempt))
-              : (retryAfterMs(response) ?? Math.min(16_000, 1_500 * 2 ** attempt));
-
-          if (response.status === 429 && typeof aiLimiter.penalize === "function") {
-            aiLimiter.penalize(wait);
-          }
-
-          await new Promise((resolve) => setTimeout(resolve, wait));
-          lastError = error;
-          continue;
-        }
-        throw error;
+        jsonMode = false;
+        retry = true;
+        waitMs = 1_500;
+      } else if (status === 429 && attempt < 4) {
+        // A 429 is account-wide and NIM usually omits Retry-After. Hold every
+        // lane for the same time, shrink the limiter's ceiling, and wait long
+        // enough for the provider to actually cool down — seconds are not
+        // enough, which is why the old schedule failed on long builds.
+        waitMs = Math.max(serverDelay ?? 0, COOLDOWN_429_MS[attempt]);
+        aiLimiter.penalize(waitMs);
+        console.warn(
+          `[nim] provider rate limit (429): pausing all lanes ${Math.round(waitMs / 1000)}s before attempt ${attempt + 2} of 5`,
+        );
+        retry = true;
+      } else if (RETRYABLE.has(status) && attempt < 4) {
+        waitMs = serverDelay ?? Math.min(16_000, 1_500 * 2 ** (attempt + 1));
+        retry = true;
       }
 
-      const payload = (await response.json()) as {
-        choices?: { message?: { content?: string } }[];
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
-      };
-
-      const content = payload.choices?.[0]?.message?.content?.trim();
-      if (!content) {
-        lastError = new AiError("The model returned an empty response.");
-        continue;
-      }
-
-      recordUsage(meta, payload.usage);
-      return { content, usage: payload.usage };
+      if (!retry) throw lastError;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
+  }
 
-    throw lastError ?? new AiError("The model did not respond.");
-  });
+  throw lastError ?? new AiError("The model did not respond.");
 }
 
 function parseJsonLoose<T>(raw: string): T | null {
@@ -214,8 +223,10 @@ function parseJsonLoose<T>(raw: string): T | null {
 }
 
 /**
- * Asks the model for JSON and validates it with `validate`. One repair round is
- * attempted because small models occasionally wrap output in prose.
+ * Asks the model for JSON and validates it with `validate`. Each round makes a
+ * fresh attempt plus one repair, and two rounds are run before giving up: one
+ * window whose answer failed validation twice used to kill an entire build at
+ * the end of a long map phase.
  */
 export async function nimJson<T>(
   params: {
@@ -230,49 +241,49 @@ export async function nimJson<T>(
     repairHint?: string;
   },
 ): Promise<T> {
-  const first = await callNim(
-    [
-      { role: "system", content: params.system },
-      { role: "user", content: params.user },
-    ],
-    {
+  const opening: NimMessage[] = [
+    { role: "system", content: params.system },
+    { role: "user", content: params.user },
+  ];
+
+  const ask = (messages: NimMessage[], kind: string, temperature: number) =>
+    callNim(messages, {
       json: true,
       maxTokens: params.maxTokens,
-      temperature: params.temperature ?? 0.2,
+      temperature,
       priority: params.priority,
-      meta: params.meta,
-    },
-  );
+      meta: { ...params.meta, kind },
+    });
 
-  const parsed = parseJsonLoose<unknown>(first.content);
-  const valid = parsed === null ? null : params.validate(parsed);
-  if (valid !== null) return valid;
+  for (let round = 0; round < 2; round += 1) {
+    // A slightly higher temperature on the second round: repeating the exact
+    // same prompt tends to reproduce the exact same rejected answer.
+    const first = await ask(opening, params.meta.kind, round === 0 ? params.temperature ?? 0.2 : 0.5);
 
-  const repair = await callNim(
-    [
-      { role: "system", content: params.system },
-      { role: "user", content: params.user },
-      { role: "assistant", content: first.content.slice(0, 6_000) },
-      {
-        role: "user",
-        content:
-          "That response was rejected. " +
-          (params.repairHint ? `${params.repairHint} ` : "") +
-          "Reply with ONLY the JSON object described above — no prose, no markdown fences, no comments. Keep every field.",
-      },
-    ],
-    {
-      json: true,
-      maxTokens: params.maxTokens,
-      temperature: 0,
-      priority: params.priority,
-      meta: { ...params.meta, kind: `${params.meta.kind}:repair` },
-    },
-  );
+    const parsed = parseJsonLoose<unknown>(first.content);
+    const valid = parsed === null ? null : params.validate(parsed);
+    if (valid !== null) return valid;
 
-  const repaired = parseJsonLoose<unknown>(repair.content);
-  const validRepair = repaired === null ? null : params.validate(repaired);
-  if (validRepair !== null) return validRepair;
+    const repair = await ask(
+      [
+        ...opening,
+        { role: "assistant", content: first.content.slice(0, 6_000) },
+        {
+          role: "user",
+          content:
+            "That response was rejected. " +
+            (params.repairHint ? `${params.repairHint} ` : "") +
+            "Reply with ONLY the JSON object described above — no prose, no markdown fences, no comments. Keep every field.",
+        },
+      ],
+      `${params.meta.kind}:repair`,
+      0,
+    );
+
+    const repaired = parseJsonLoose<unknown>(repair.content);
+    const validRepair = repaired === null ? null : params.validate(repaired);
+    if (validRepair !== null) return validRepair;
+  }
 
   throw new AiError("The model kept returning malformed JSON.");
 }

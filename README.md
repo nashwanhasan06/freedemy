@@ -100,10 +100,13 @@ Open <http://localhost:3000>, create an account, and paste a coding lecture with
 1. **Read** — `lib/ai/transcript.ts` runs `yt-dlp` to fetch the English caption track as JSON3
    plus the video metadata, then converts it into timestamped cues. If yt-dlp is missing it
    falls back to YouTube's caption endpoint directly.
-2. **Map** — the transcript is split into at most 16 timed windows. Each window gets one model
-   call that returns topic segments with timestamps and bullets.
-3. **Outline** — one call turns those segments into 3–8 modules of 2–4 lessons, normalised so the
-   timeline tiles the video without overlaps, and rejected unless it reaches the end of the video.
+2. **Map** — the transcript is split into fixed 20-minute windows (a longer video maps in more
+   windows, never bigger ones, so every window stays inside the prompt's character budget). Each
+   window gets one model call that returns topic segments with timestamps and bullets.
+3. **Outline** — one call turns those segments into modules scaled to the runtime (no fixed
+   ceiling, at least 4 lessons each), guided but not bound by the chapter timestamps yt-dlp
+   reads from the video description, normalised so the timeline tiles the video without
+   overlaps, and rejected unless it reaches the end of the video.
 4. **Plan assessments** — one call per module decides how each section should be tested: two to
    four checks, each naming a testing move (recall, predict the output, find the bug, trace it,
    explain the trade-off, implement it) and the idea it targets. A conceptual section gets
@@ -123,19 +126,27 @@ a course with zero sections yet sends the student back to the generating screen.
 
 ### Staying inside 40 RPM
 
-`lib/ai/limiter.ts` enforces four things:
+`lib/ai/limiter.ts` enforces five things:
 
 - A rolling 60-second window capped at `AI_RPM_LIMIT` (40). No burst can exceed it.
+- Every real HTTP request takes a slot of its own — including each retry — so a
+  call that retries four times costs four slots, not one.
 - Separate in-flight caps per lane: at most `AI_CONCURRENCY` (4) interactive requests
   (tutor, grading) and at most `AI_BACKGROUND_CONCURRENCY` (10) background generation
   requests — a busy build cannot fill every slot and starve a student.
 - Background generation is capped at `rpm - AI_INTERACTIVE_RESERVE` (32/min), so a student
   submitting an assignment or asking the tutor always has ~8 requests/minute of headroom.
+- On a provider 429 the whole account pauses together and the ceiling itself shrinks by
+  25% (floor 4/min), then earns one request back per quiet minute — so the client stays
+  under whatever the account's real limit turns out to be.
 
-429 and 5xx responses are retried with `Retry-After` or exponential backoff (4 attempts).
-Every call is logged to `ai_usage` for auditing.
+429s wait 30s → 60s → 120s → 180s (or the server's `Retry-After`, whichever is longer) and
+pause every lane for the same time; 5xx and transport errors retry with exponential backoff.
+A long build slows down instead of failing. Every call is logged to `ai_usage` for auditing.
 
-A long lecture costs roughly 16 + 1 + 8 ≈ 25 calls, so a build takes about a minute and never
+A build costs roughly `windows + 1 + modules + lessons` model calls: a 3.5-hour lecture needs
+~11 + 1 + 4 + 25 ≈ 40 calls (a couple of minutes), and even a 70-hour marathon (~210 map calls
+plus the outline, plans and lessons) is paced under 40 RPM, so it takes longer but never
 crosses the account limit.
 
 > The limiter is process-local, which is correct for `next dev` / `next start` on one machine.

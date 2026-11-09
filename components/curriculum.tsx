@@ -41,6 +41,9 @@ export function Curriculum({ course, activeLessonId, grades, onSelect }: Curricu
               <span className="flex min-w-0 flex-col gap-0.5 pr-2">
                 <span className="flex items-center gap-2 text-[0.7rem] font-medium tracking-wide text-muted-foreground uppercase">
                   Chapter {index + 1}
+                  {chapter.written && course.status !== "ready" && (
+                    <span className="text-[0.6rem] text-success-ink normal-case">written</span>
+                  )}
                   {mastered && (
                     <span className="text-[0.6rem] text-primary normal-case">complete</span>
                   )}

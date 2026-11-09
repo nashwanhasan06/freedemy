@@ -74,6 +74,24 @@ function gradesFrom(rows: ProgressRow[]): GradeMap {
   }, {});
 }
 
+/**
+ * A chapter is written when its sections tile the module's slice of video.
+ * A build writes them in order, so a hole anywhere means the chapter is
+ * still being generated (or never finished).
+ */
+function tilesRange(
+  module: { start_seconds: number; end_seconds: number },
+  lessons: { start_seconds: number; end_seconds: number }[],
+): boolean {
+  if (lessons.length === 0) return false;
+  let cursor = module.start_seconds;
+  for (const lesson of lessons) {
+    if (lesson.start_seconds !== cursor) return false;
+    cursor = lesson.end_seconds;
+  }
+  return cursor === module.end_seconds;
+}
+
 function buildChapters(
   modules: ModuleRow[],
   lessons: LessonRow[],
@@ -86,11 +104,16 @@ function buildChapters(
     exercisesByLesson.set(row.lesson_id, list);
   }
 
-  return byPosition(modules).map((module) => ({
-    id: module.id,
-    title: module.title,
-    lessons: byPosition(lessons.filter((lesson) => lesson.module_id === module.id)).map(
-      (lesson) => {
+  return byPosition(modules).map((module) => {
+    const moduleLessons = byPosition(
+      lessons.filter((lesson) => lesson.module_id === module.id),
+    );
+
+    return {
+      id: module.id,
+      title: module.title,
+      written: tilesRange(module, moduleLessons),
+      lessons: moduleLessons.map((lesson) => {
         const rows = byPosition(exercisesByLesson.get(lesson.id) ?? []);
         const questions = rows.filter((row) => row.kind === "mcq").map(mcqFrom);
         const shortRow = rows.find((row) => row.kind === "short");
@@ -110,9 +133,9 @@ function buildChapters(
           codeExercises,
         };
         return mapped;
-      },
-    ),
-  }));
+      }),
+    };
+  });
 }
 
 /** Full course with notes, exercises and the student's grades. */
