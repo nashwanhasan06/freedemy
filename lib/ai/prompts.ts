@@ -290,6 +290,50 @@ ${exercise.submitted || "(empty)"}`;
 }
 
 /**
+ * The chapter-end exam (see lib/locks.ts). Written the first time a student
+ * opens the exam and cached in chapter_quizzes, so every retake asks the same
+ * paper. Available whether or not rigorous study mode is on; only rigorous
+ * mode lets a cleared run gate the next chapter.
+ */
+export function chapterQuizSystem(): string {
+  return `You write the end-of-chapter exam for a coding course built from a YouTube lecture.
+You receive one chapter: its title and the notes of every section it contains.
+${JSON_RULES}
+Shape: {"questions":[
+  {"kind":"mcq","prompt":string,"options":string[],"answer":number,"explanation":string},
+  {"kind":"short","prompt":string,"answer":string,"keywords":string[],"explanation":string},
+  {"kind":"code","prompt":string,"language":string,"solution":string,"explanation":string}]}
+Exam rules:
+- Exactly 5 questions, ordered as the material is taught. Every question carries a "kind": "mcq", "short" or "code".
+- Exactly one question is "short": a written answer the student types. Give an "answer" model of 2 to 4 sentences and 3 to 5 "keywords" any good answer would contain.
+- At most one question is "code": include it only when the chapter's notes show runnable code, syntax or commands the student could actually write. Give the course "language", a complete correct "solution" under 20 lines, and the task in "prompt".
+- All remaining questions are "mcq": four options each, exactly one "answer" index. Options are parallel (never "all of the above"). With a code question that is 3 mcq; without one, 4 mcq.
+- Test this chapter only: the mechanisms it explains, the syntax or commands it shows, when to use what, and the edge cases its notes call out. Nothing from other chapters, nothing the notes never taught.
+- Make the wrong options plausible misconceptions a student of these notes would actually hold.
+- "explanation" is 1 to 3 sentences shown after grading: why the answer is right and why the pick or attempt is wrong.
+- Every question must be answerable from the notes alone.`;
+}
+
+export function chapterQuizUser(params: {
+  courseTitle: string;
+  language: string;
+  chapterTitle: string;
+  sections: { title: string; summary: string; notes: string }[];
+}): string {
+  return `Course: ${params.courseTitle}
+Course language: ${params.language}
+Chapter: ${params.chapterTitle}
+
+Sections in this chapter:
+${params.sections.map((section) => `- ${section.title}: ${section.summary || "(no outline note)"}`).join("\n")}
+
+Notes:
+${params.sections
+  .map((section) => `--- ${section.title}\n${section.notes || "(no notes yet)"}`)
+  .join("\n\n")}`;
+}
+
+/**
  * The capstone brief. Generated once per course from its own outline, so the
  * project always asks for skills the course actually taught.
  */

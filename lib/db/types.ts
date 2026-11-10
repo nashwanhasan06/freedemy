@@ -15,6 +15,7 @@ export type CourseRow = {
   status: "queued" | "fetching" | "outlining" | "writing" | "ready" | "failed";
   stage: string;
   error: string | null;
+  rigorous: boolean;
   created_at: string;
   updated_at: string;
 };

@@ -106,6 +106,8 @@ export type Course = {
   error?: string | null;
   language?: string;
   durationSeconds?: number;
+  /** Per-course rigorous study mode: sequential section/chapter locks. */
+  rigorous?: boolean;
 };
 
 export type GradedLesson = {
@@ -115,6 +117,16 @@ export type GradedLesson = {
 };
 
 export type GradeMap = Record<string, GradedLesson>;
+
+/** Best chapter-exam run for one chapter (rigorous study mode). */
+export type ChapterQuizProgress = {
+  bestScore: number;
+  attempts: number;
+  passed: boolean;
+};
+
+/** chapter id -> exam progress. */
+export type QuizProgressMap = Record<string, ChapterQuizProgress>;
 
 export type ExerciseError = {
   severity: "error" | "warning" | "tip";

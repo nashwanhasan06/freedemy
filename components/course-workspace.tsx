@@ -6,14 +6,17 @@ import {
   Flag,
   ListTree,
   Loader2,
+  Lock,
   Sparkles,
   TriangleAlert,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { Brand } from "@/components/brand";
+import { ChapterExam } from "@/components/chapter-exam";
 import { SignOutButton } from "@/components/sign-out-button";
 import { CoursePlayer } from "@/components/course-player";
 import { Curriculum } from "@/components/curriculum";
@@ -25,9 +28,11 @@ import { TutorCta } from "@/components/tutor/tutor-cta";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { setRigorousAction } from "@/lib/actions/rigorous";
 import { adjacentLesson, courseLessons } from "@/lib/course";
 import { formatLength } from "@/lib/format";
-import type { Course, GradeMap, GradedLesson } from "@/lib/types";
+import { computeLocks } from "@/lib/locks";
+import type { ChapterQuizProgress, Course, GradeMap, GradedLesson, QuizProgressMap } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import type { YouTubePlayer } from "@/lib/youtube";
 
@@ -41,21 +46,35 @@ const TABS = [
 export function CourseWorkspace({
   course,
   initialGrades,
+  initialQuizzes,
   project,
 }: {
   course: Course;
   initialGrades: GradeMap;
+  /** Chapter-end exam progress. */
+  initialQuizzes: QuizProgressMap;
   /** Whether the capstone brief exists, and whether it has been passed. */
   project?: { exists: boolean; passed: boolean };
 }) {
   const lessons = useMemo(() => courseLessons(course), [course]);
   const [activeLessonId, setActiveLessonId] = useState(lessons[0]?.id ?? "");
   const [grades, setGrades] = useState<GradeMap>(() => initialGrades);
+  const [quizzes, setQuizzes] = useState<QuizProgressMap>(() => initialQuizzes);
+  const [rigorous, setRigorous] = useState<boolean>(Boolean(course.rigorous));
+  const [examChapterId, setExamChapterId] = useState<string | null>(null);
+  const [savingRigorous, setSavingRigorous] = useState(false);
   const [tab, setTab] = useState("overview");
   const [autoPlayNext, setAutoPlayNext] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const router = useRouter();
+
+  // One set of rules (lib/locks.ts) drives the sidebar, the player's Next
+  // button and the exam actions, so they can never disagree about a lock.
+  const locks = useMemo(
+    () => computeLocks(course, grades, quizzes, rigorous),
+    [course, grades, quizzes, rigorous],
+  );
 
   // The course can be opened before the build finishes: sections are saved one
   // at a time. Re-render the server page periodically so newly written sections
@@ -76,10 +95,29 @@ export function CourseWorkspace({
   const progress = lessons.length === 0 ? 0 : Math.round((completed / lessons.length) * 100);
   const lessonIndex = lessons.findIndex((lesson) => lesson.id === activeLesson?.id);
 
+  const activeChapterIndex = useMemo(() => {
+    if (!activeLesson) return -1;
+    return course.chapters.findIndex((chapter) =>
+      chapter.lessons.some((lesson) => lesson.id === activeLesson.id),
+    );
+  }, [course, activeLesson]);
+
+  const nextLesson = lessonIndex >= 0 ? lessons[lessonIndex + 1] : undefined;
+  // At the end of a chapter whose sections all passed, Next heads for its exam.
+  const examAhead =
+    activeChapterIndex >= 0 && locks.examState(activeChapterIndex) === "available";
+  const hasNext = Boolean(nextLesson && (locks.lessonUnlocked(nextLesson.id) || examAhead));
+
   const selectLesson = useCallback((lessonId: string) => {
+    setExamChapterId(null);
     setActiveLessonId(lessonId);
     setDrawerOpen(false);
     window.history.replaceState(null, "", `#lesson-${lessonId}`);
+  }, []);
+
+  const openExam = useCallback((chapterId: string) => {
+    setExamChapterId(chapterId);
+    setDrawerOpen(false);
   }, []);
 
   // Deep links like /course/python-fundamentals#lesson-loops
@@ -98,9 +136,17 @@ export function CourseWorkspace({
   const goToLesson = useCallback(
     (direction: -1 | 1) => {
       const target = adjacentLesson(course, activeLessonId, direction);
-      if (target) selectLesson(target.id);
+      if (!target) return;
+      if (locks.lessonUnlocked(target.id)) {
+        selectLesson(target.id);
+        return;
+      }
+      // Next ran into a sealed section: its chapter's exam is the way through.
+      if (direction === 1 && examAhead && activeChapterIndex >= 0) {
+        openExam(course.chapters[activeChapterIndex].id);
+      }
     },
-    [course, activeLessonId, selectLesson],
+    [course, activeLessonId, selectLesson, locks, examAhead, activeChapterIndex, openExam],
   );
 
   const rewatch = useCallback((at: number) => {
@@ -114,7 +160,41 @@ export function CourseWorkspace({
     setGrades((current) => ({ ...current, [lessonId]: grade }));
   }, []);
 
+  const handleQuiz = useCallback(
+    (moduleId: string, quizProgress: ChapterQuizProgress) => {
+      setQuizzes((current) => ({ ...current, [moduleId]: quizProgress }));
+    },
+    [],
+  );
+
+  async function toggleRigorous(next: boolean) {
+    if (!course.id || savingRigorous) return;
+    setRigorous(next); // optimistic: locks recompute on the spot
+    setSavingRigorous(true);
+    const response = await setRigorousAction(course.id, next);
+    setSavingRigorous(false);
+    if (!response.ok) {
+      setRigorous(!next);
+      toast.error(response.error);
+    }
+  }
+
   if (!activeLesson) return null;
+
+  const examChapterIndex = examChapterId
+    ? course.chapters.findIndex((chapter) => chapter.id === examChapterId)
+    : -1;
+  const examChapter = examChapterIndex >= 0 ? course.chapters[examChapterIndex] : undefined;
+
+  // A deep link (or a click on a sealed level) shows why the section is shut.
+  const viewingLocked = !examChapter && !locks.lessonUnlocked(activeLesson.id);
+  const activeChapter =
+    activeChapterIndex >= 0 ? course.chapters[activeChapterIndex] : undefined;
+  const blockerLesson =
+    viewingLocked && activeChapter && locks.chapterUnlocked(activeChapterIndex)
+      ? activeChapter.lessons.find((lesson) => !locks.sectionPassed(lesson.id))
+      : undefined;
+  const firstOpenLesson = lessons.find((lesson) => locks.lessonUnlocked(lesson.id));
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -145,6 +225,43 @@ export function CourseWorkspace({
                 {progress}%
               </span>
             </div>
+
+            <label
+              className="inline-flex h-8 cursor-pointer items-center gap-1.5 select-none sm:gap-2"
+              title="Rigorous study: sections unlock in order and each chapter's exam gates the next"
+            >
+              <Lock
+                className={cn(
+                  "size-3.5",
+                  rigorous ? "text-primary" : "text-muted-foreground/70",
+                )}
+                aria-hidden="true"
+              />
+              <span className="hidden text-[0.75rem] font-medium text-muted-foreground md:inline">
+                Rigorous study
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label="Rigorous study mode"
+                checked={rigorous}
+                onChange={(event) => toggleRigorous(event.target.checked)}
+                className="peer sr-only"
+              />
+              <span
+                className={cn(
+                  "relative h-4 w-7 rounded-full transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-ring",
+                  rigorous ? "bg-primary" : "bg-muted-foreground/30",
+                )}
+              >
+                <span
+                  className={cn(
+                    "absolute top-0.5 left-0.5 size-3 rounded-full bg-white shadow-xs transition-transform",
+                    rigorous && "translate-x-3",
+                  )}
+                />
+              </span>
+            </label>
 
             <SignOutButton className="h-7 px-2 text-[0.75rem]" />
             <ThemeToggle />
@@ -207,6 +324,55 @@ export function CourseWorkspace({
 
         <div className="grid grid-cols-1 gap-7 lg:grid-cols-[minmax(0,1fr)_352px]">
           <div className="min-w-0">
+            {examChapter ? (
+              <div className="rounded-2xl border border-border/70 bg-muted/20 p-4 sm:p-6">
+                <ChapterExam
+                  key={examChapter.id}
+                  chapterIndex={examChapterIndex}
+                  chapterTitle={examChapter.title}
+                  moduleId={examChapter.id}
+                  progress={quizzes[examChapter.id]}
+                  rigorous={rigorous}
+                  hasNextChapter={examChapterIndex < course.chapters.length - 1}
+                  onProgress={handleQuiz}
+                  onClose={() => setExamChapterId(null)}
+                  onNextChapter={() => {
+                    const nextChapter = course.chapters[examChapterIndex + 1];
+                    setExamChapterId(null);
+                    if (nextChapter?.lessons[0]) selectLesson(nextChapter.lessons[0].id);
+                  }}
+                />
+              </div>
+            ) : viewingLocked ? (
+              <LockedLessonPanel
+                lessonTitle={activeLesson.title}
+                reason={
+                  activeChapter && !locks.chapterUnlocked(activeChapterIndex)
+                    ? `Chapter ${activeChapterIndex + 1} is sealed. Clear chapter ${activeChapterIndex}'s end exam to open it.`
+                    : `Pass the assignment of “${blockerLesson?.title ?? "the previous section"}” (70%) to unlock this section.`
+                }
+                blockerLabel={
+                  blockerLesson
+                    ? `Go to “${blockerLesson.title}”`
+                    : activeChapter && activeChapterIndex > 0 &&
+                        locks.examState(activeChapterIndex - 1) === "available"
+                      ? `Take the chapter ${activeChapterIndex} end exam`
+                      : undefined
+                }
+                onBlocker={
+                  blockerLesson
+                    ? () => selectLesson(blockerLesson.id)
+                    : activeChapter &&
+                        activeChapterIndex > 0 &&
+                        locks.examState(activeChapterIndex - 1) === "available"
+                      ? () => openExam(course.chapters[activeChapterIndex - 1].id)
+                      : undefined
+                }
+                backLabel={firstOpenLesson ? "Back to the open section" : "Back"}
+                onBack={() => firstOpenLesson && selectLesson(firstOpenLesson.id)}
+              />
+            ) : (
+              <>
             {/* Not sticky on phones: the player is ~38% of the viewport there and panels
                 scrolled underneath it, which ate taps. Desktop keeps the in-flow layout. */}
             <div className="relative -mx-4 bg-background/95 px-4 pt-1 pb-3 backdrop-blur-sm lg:static lg:mx-0 lg:bg-transparent lg:px-0 lg:pt-0 lg:backdrop-blur-none">
@@ -244,7 +410,7 @@ export function CourseWorkspace({
                 onPrevious={() => goToLesson(-1)}
                 onNext={() => goToLesson(1)}
                 hasPrevious={lessonIndex > 0}
-                hasNext={lessonIndex < lessons.length - 1}
+                hasNext={hasNext}
               />
             </div>
 
@@ -327,6 +493,8 @@ export function CourseWorkspace({
                 </TabsContent>
               </Tabs>
             </div>
+              </>
+            )}
           </div>
 
           <aside className="hidden lg:block">
@@ -354,7 +522,10 @@ export function CourseWorkspace({
                     course={course}
                     activeLessonId={activeLesson.id}
                     grades={grades}
+                    locks={locks}
+                    quizzes={quizzes}
                     onSelect={selectLesson}
+                    onExam={openExam}
                   />
                 </div>
               </div>
@@ -376,7 +547,10 @@ export function CourseWorkspace({
               course={course}
               activeLessonId={activeLesson.id}
               grades={grades}
+              locks={locks}
+              quizzes={quizzes}
               onSelect={selectLesson}
+              onExam={openExam}
             />
           </div>
           <div className="border-t border-border/80 p-3 bg-muted/20">
@@ -408,6 +582,50 @@ export function CourseWorkspace({
           </div>
         </SheetContent>
       </Sheet>
+    </div>
+  );
+}
+
+/** Why a sealed section is shut, and the one action that opens it. */
+function LockedLessonPanel({
+  lessonTitle,
+  reason,
+  blockerLabel,
+  onBlocker,
+  backLabel,
+  onBack,
+}: {
+  lessonTitle: string;
+  reason: string;
+  blockerLabel?: string;
+  onBlocker?: () => void;
+  backLabel: string;
+  onBack: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-start gap-4 rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <span className="grid size-11 place-items-center rounded-xl border border-warning/40 bg-warning-soft text-warning-ink">
+        <Lock className="size-5" />
+      </span>
+      <div>
+        <p className="text-[0.68rem] font-semibold uppercase tracking-wider text-muted-foreground">
+          Section locked
+        </p>
+        <h2 className="mt-0.5 text-base font-bold tracking-tight sm:text-lg">{lessonTitle}</h2>
+        <p className="mt-1.5 max-w-prose text-[0.85rem] leading-relaxed text-muted-foreground">
+          {reason}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2.5">
+        {blockerLabel && onBlocker && (
+          <Button onClick={onBlocker} className="h-10">
+            {blockerLabel}
+          </Button>
+        )}
+        <Button variant="outline" onClick={onBack} className="h-10">
+          {backLabel}
+        </Button>
+      </div>
     </div>
   );
 }

@@ -54,6 +54,7 @@ export default async function CoursePage({ params }: PageProps<"/course/[slug]">
     <CourseWorkspace
       course={bundle.course}
       initialGrades={bundle.grades}
+      initialQuizzes={bundle.quizzes}
       project={{
         exists: lookup.status === "ready",
         passed: lookup.status === "ready" ? lookup.state.passed : false,

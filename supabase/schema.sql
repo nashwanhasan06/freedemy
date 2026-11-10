@@ -95,6 +95,11 @@ create table if not exists public.courses (
 
 create index if not exists courses_user_idx on public.courses (user_id, created_at desc);
 
+-- Rigorous study mode: when on, sections unlock in order (assignment passed)
+-- and each chapter's end exam gates the next chapter.
+alter table public.courses
+  add column if not exists rigorous boolean not null default false;
+
 alter table public.courses enable row level security;
 
 drop policy if exists "courses_owner_all" on public.courses;
@@ -391,6 +396,40 @@ create trigger courses_touch_updated_at
   for each row execute function public.touch_updated_at();
 
 -- ---------------------------------------------------------------------------
+-- Chapter-end exams (rigorous study mode). One row per student per chapter:
+-- `questions` caches the generated MCQs so every retake asks the same paper,
+-- while best_score/attempts record the runs. Only a passed exam (>= 80%)
+-- opens the next chapter.
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.chapter_quizzes (
+  user_id uuid not null references auth.users (id) on delete cascade,
+  course_id uuid not null references public.courses (id) on delete cascade,
+  module_id uuid not null references public.modules (id) on delete cascade,
+  questions jsonb not null default '[]'::jsonb,
+  best_score integer not null default 0,
+  attempts integer not null default 0,
+  passed boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, module_id)
+);
+
+create index if not exists chapter_quizzes_course_idx
+  on public.chapter_quizzes (user_id, course_id);
+
+alter table public.chapter_quizzes enable row level security;
+
+drop policy if exists "chapter_quizzes_owner_all" on public.chapter_quizzes;
+create policy "chapter_quizzes_owner_all" on public.chapter_quizzes
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop trigger if exists chapter_quizzes_touch_updated_at on public.chapter_quizzes;
+create trigger chapter_quizzes_touch_updated_at
+  before update on public.chapter_quizzes
+  for each row execute function public.touch_updated_at();
+
+-- ---------------------------------------------------------------------------
 -- Table privileges. Supabase grants these by default; spelling them out keeps
 -- a manually created project behaving the same way.
 -- ---------------------------------------------------------------------------
@@ -407,6 +446,7 @@ grant select, insert on public.project_submissions to authenticated;
 grant select, insert, update, delete on public.lesson_progress to authenticated;
 grant select, insert, update, delete on public.tutor_messages to authenticated;
 grant select, insert, update, delete on public.tutor_summaries to authenticated;
+grant select, insert, update, delete on public.chapter_quizzes to authenticated;
 
 -- Supabase's default privileges hand anon the same rights as authenticated on
 -- new public tables. Remove them: signed-out visitors have no policies anyway,
@@ -422,6 +462,7 @@ revoke all on public.project_submissions from anon;
 revoke all on public.lesson_progress from anon;
 revoke all on public.tutor_messages from anon;
 revoke all on public.tutor_summaries from anon;
+revoke all on public.chapter_quizzes from anon;
 revoke all on public.ai_usage from anon, authenticated;
 
 -- Trigger helpers are never callable RPCs.

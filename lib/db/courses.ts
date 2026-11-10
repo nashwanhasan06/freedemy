@@ -7,6 +7,7 @@ import type {
   GradeMap,
   Lesson,
   Mcq,
+  QuizProgressMap,
   ShortAnswer,
 } from "@/lib/types";
 
@@ -16,6 +17,8 @@ import type { CourseRow, ExerciseRow, LessonRow, ModuleRow, ProgressRow } from "
 export type CourseBundle = {
   course: Course;
   grades: GradeMap;
+  /** Chapter-end exam progress (rigorous study mode). */
+  quizzes: QuizProgressMap;
 };
 
 export type CourseSummary = CourseBundle & {
@@ -70,6 +73,24 @@ function codeExerciseFrom(row: ExerciseRow): CodeExercise {
 function gradesFrom(rows: ProgressRow[]): GradeMap {
   return rows.reduce<GradeMap>((map, row) => {
     map[row.lesson_id] = { score: row.score, correct: row.correct, total: row.total };
+    return map;
+  }, {});
+}
+
+type QuizRow = {
+  module_id: string;
+  best_score: number;
+  attempts: number;
+  passed: boolean;
+};
+
+function quizzesFrom(rows: QuizRow[]): QuizProgressMap {
+  return rows.reduce<QuizProgressMap>((map, row) => {
+    map[row.module_id] = {
+      bestScore: row.best_score,
+      attempts: row.attempts,
+      passed: row.passed,
+    };
     return map;
   }, {});
 }
@@ -156,17 +177,33 @@ export async function getCourseBundle(
 
   const courseRow = courseData as CourseRow;
 
-  const [{ data: moduleData }, { data: lessonData }, { data: exerciseData }, { data: progressData }] =
-    await Promise.all([
-      supabase.from("modules").select("*").eq("course_id", courseRow.id),
-      supabase.from("lessons").select("*").eq("course_id", courseRow.id),
-      supabase.from("exercises").select("*").eq("course_id", courseRow.id),
-      supabase
-        .from("lesson_progress")
-        .select("course_id,lesson_id,score,correct,total")
-        .eq("user_id", userId)
-        .eq("course_id", courseRow.id),
-    ]);
+  const [
+    { data: moduleData },
+    { data: lessonData },
+    { data: exerciseData },
+    { data: progressData },
+    { data: quizData, error: quizError },
+  ] = await Promise.all([
+    supabase.from("modules").select("*").eq("course_id", courseRow.id),
+    supabase.from("lessons").select("*").eq("course_id", courseRow.id),
+    supabase.from("exercises").select("*").eq("course_id", courseRow.id),
+    supabase
+      .from("lesson_progress")
+      .select("course_id,lesson_id,score,correct,total")
+      .eq("user_id", userId)
+      .eq("course_id", courseRow.id),
+    supabase
+      .from("chapter_quizzes")
+      .select("module_id,best_score,attempts,passed")
+      .eq("user_id", userId)
+      .eq("course_id", courseRow.id),
+  ]);
+
+  // A database that has not run the latest schema.sql has no chapter_quizzes
+  // table; the course then simply behaves as if no exam had ever been taken.
+  if (quizError && !/does not exist|schema cache/i.test(quizError.message)) {
+    console.warn("[courses] could not load chapter quizzes", quizError.message);
+  }
 
   const course: Course = {
     id: courseRow.id,
@@ -187,9 +224,14 @@ export async function getCourseBundle(
     error: courseRow.error,
     language: courseRow.language,
     durationSeconds: courseRow.duration_seconds,
+    rigorous: Boolean(courseRow.rigorous),
   };
 
-  return { course, grades: gradesFrom((progressData ?? []) as ProgressRow[]) };
+  return {
+    course,
+    grades: gradesFrom((progressData ?? []) as ProgressRow[]),
+    quizzes: quizError ? {} : quizzesFrom((quizData ?? []) as QuizRow[]),
+  };
 }
 
 /**
@@ -274,6 +316,8 @@ export async function listCourseSummaries(
     return {
       course,
       grades,
+      // The dashboard never shows exams or locks, so no quiz rows are loaded.
+      quizzes: {},
       progress: lessonCount === 0 ? 0 : Math.round((done / lessonCount) * 100),
       lessonCount,
       projectPassed: completed.has(courseRow.id),
