@@ -158,6 +158,44 @@ create policy "lessons_owner_all" on public.lessons
   with check (exists (select 1 from public.courses c where c.id = course_id and c.user_id = auth.uid()));
 
 -- ---------------------------------------------------------------------------
+-- Playlist courses: one course can span many videos
+-- ---------------------------------------------------------------------------
+
+-- One row per video of a playlist course (courses.video_id then holds the
+-- playlist id). Single-video courses have no rows here.
+create table if not exists public.course_videos (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.courses (id) on delete cascade,
+  position integer not null,
+  video_id text not null,
+  title text not null default '',
+  duration_seconds integer not null default 0,
+  status text not null default 'queued',
+  error text,
+  attempts integer not null default 0,
+  unique (course_id, position),
+  unique (course_id, video_id)
+);
+
+create index if not exists course_videos_course_idx on public.course_videos (course_id, position);
+
+alter table public.course_videos enable row level security;
+
+drop policy if exists "course_videos_owner_all" on public.course_videos;
+create policy "course_videos_owner_all" on public.course_videos
+  for all
+  using (exists (select 1 from public.courses c where c.id = course_id and c.user_id = auth.uid()))
+  with check (exists (select 1 from public.courses c where c.id = course_id and c.user_id = auth.uid()));
+
+-- Chapters and sections know which playlist video they play in. Null on
+-- single-video courses, which keep the old behaviour.
+alter table public.modules add column if not exists course_video_id uuid references public.course_videos (id) on delete cascade;
+alter table public.lessons add column if not exists course_video_id uuid references public.course_videos (id) on delete cascade;
+
+create index if not exists modules_video_idx on public.modules (course_video_id);
+create index if not exists lessons_video_idx on public.lessons (course_video_id);
+
+-- ---------------------------------------------------------------------------
 -- Exercises (multiple choice, short answer, coding tasks)
 -- ---------------------------------------------------------------------------
 

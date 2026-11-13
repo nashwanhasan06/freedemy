@@ -35,7 +35,7 @@ export type Lecture = {
 export class TranscriptError extends Error {
   constructor(
     message: string,
-    readonly code: "no-captions" | "unavailable" | "network" | "tooling",
+    readonly code: "no-captions" | "rate-limited" | "unavailable" | "network" | "tooling",
   ) {
     super(message);
     this.name = "TranscriptError";
@@ -47,6 +47,8 @@ const execFileAsync = promisify(execFile);
 const YTDLP = process.env.YTDLP_PATH?.trim() || "yt-dlp";
 const YTDLP_COOKIES = process.env.YTDLP_COOKIES?.trim();
 const YTDLP_PROXY = process.env.YTDLP_PROXY?.trim();
+
+export { YTDLP, YTDLP_COOKIES, YTDLP_PROXY };
 
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
@@ -232,13 +234,14 @@ async function loadWithYtDlp(videoId: string): Promise<Lecture | null> {
     }
 
     if (!subtitleFile) {
+      const throttled = /429|too many requests/i.test(stderr);
       throw new TranscriptError(
-        /429|too many requests/i.test(stderr)
+        throttled
           ? "YouTube is rate-limiting caption downloads from this machine. Wait a few minutes, then try again."
           : /sign in to confirm|captcha/i.test(stderr)
             ? "YouTube asked this machine to prove it is not a bot, so the captions could not be downloaded. Try again later."
             : `This video has no English captions that yt-dlp could download.${stderr ? ` (${stderr.split("\n").filter(Boolean).at(-1)?.slice(0, 200)})` : ""}`,
-        "no-captions",
+        throttled ? "rate-limited" : "no-captions",
       );
     }
 

@@ -66,6 +66,12 @@ export type Lesson = {
   /** Absolute seconds inside the source video. */
   start: number;
   end: number;
+  /**
+   * Which video this section plays in (playlist courses: sections can carry
+   * their own video after a short video is merged into a neighbouring
+   * chapter). Falls back to the course's video when absent.
+   */
+  videoId?: string;
   summary: string;
   keyTerms: KeyTerm[];
   notes: NoteBlock[];

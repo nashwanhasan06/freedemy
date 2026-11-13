@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { Brand } from "@/components/brand";
@@ -68,6 +68,10 @@ export function CourseWorkspace({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const router = useRouter();
+  // "Check now" sends the student back to the generating screen — the first
+  // screen they saw while the course was loading — which polls live progress
+  // and lands on the finished course. The spinner covers the trip.
+  const [checking, startChecking] = useTransition();
 
   // One set of rules (lib/locks.ts) drives the sidebar, the player's Next
   // button and the exam actions, so they can never disagree about a lock.
@@ -144,6 +148,13 @@ export function CourseWorkspace({
       // Next ran into a sealed section: its chapter's exam is the way through.
       if (direction === 1 && examAhead && activeChapterIndex >= 0) {
         openExam(course.chapters[activeChapterIndex].id);
+        return;
+      }
+      // Select the sealed section anyway: the page swaps the player for its
+      // lock screen, so Next (or an automatic section boundary) shows why
+      // playback stopped and how to open it instead of a frozen video.
+      if (direction === 1) {
+        selectLesson(target.id);
       }
     },
     [course, activeLessonId, selectLesson, locks, examAhead, activeChapterIndex, openExam],
@@ -295,9 +306,13 @@ export function CourseWorkspace({
             <Button
               variant="ghost"
               size="sm"
-              className="h-7 px-2 text-[0.75rem] text-warning-ink hover:bg-warning/15"
-              onClick={() => router.refresh()}
+              className="h-7 gap-1 px-2 text-[0.75rem] text-warning-ink hover:bg-warning/15"
+              disabled={checking}
+              onClick={() =>
+                startChecking(() => router.push(`/generating?course=${course.id ?? ""}`))
+              }
             >
+              {checking && <Loader2 className="size-3 animate-spin" />}
               Check now
             </Button>
           </div>
@@ -402,7 +417,7 @@ export function CourseWorkspace({
                 </div>
               </div>
               <CoursePlayer
-                videoId={course.videoId}
+                videoId={activeLesson.videoId ?? course.videoId}
                 lesson={activeLesson}
                 playerRef={playerRef}
                 autoPlayNext={autoPlayNext}
@@ -466,7 +481,7 @@ export function CourseWorkspace({
                     lesson={activeLesson}
                     onRewatch={rewatch}
                     videoSource={{
-                      videoId: course.videoId,
+                      videoId: activeLesson.videoId ?? course.videoId,
                       channel: course.channel,
                     }}
                   />
@@ -618,8 +633,8 @@ function LockedLessonPanel({
       </div>
       <div className="flex flex-wrap gap-2.5">
         {blockerLabel && onBlocker && (
-          <Button onClick={onBlocker} className="h-10">
-            {blockerLabel}
+          <Button onClick={onBlocker} className="h-10 max-w-64">
+            <span className="truncate">{blockerLabel}</span>
           </Button>
         )}
         <Button variant="outline" onClick={onBack} className="h-10">

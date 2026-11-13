@@ -68,6 +68,48 @@ type PlannedCheck = { kind: CheckKind; form: string; focus: string };
 type LessonPlan = { title: string; checks: PlannedCheck[] };
 type ModulePlan = LessonPlan[];
 
+/** One row of a playlist course's work queue (see course_videos). */
+type CourseVideoRow = {
+  id: string;
+  position: number;
+  video_id: string;
+  title: string;
+  duration_seconds: number;
+  status: string;
+  attempts: number;
+  error: string | null;
+};
+
+type BuildVideoParams = {
+  admin: SupabaseClient;
+  courseId: string;
+  userId: string;
+  videoId: string;
+  /** course_videos row id; null on single-video courses. */
+  courseVideoId: string | null;
+  /** Playlist position of this video — its chapters live at position × 1_000; 0 off-playlist. */
+  videoPosition: number;
+  /** "Video 3 of 7 · " prefix for stage lines; "" on single-video courses. */
+  label: string;
+  /** The first successful build writes course-level metadata (channel, language). */
+  isPrimary: boolean;
+};
+
+type BuildVideoResult = {
+  language: string;
+  level: string;
+  duration: number;
+  chapters: number;
+  sections: number;
+};
+
+/**
+ * One episode usually becomes one chapter. Only a single video longer than
+ * this keeps the model's natural multi-chapter split (a 3-hour lecture would
+ * otherwise become one unusable chapter).
+ */
+const SPLIT_ABOVE_SECONDS = 90 * 60;
+
 /** The database stores one exercise kind per row, so the plan cannot exceed this. */
 const CHECK_LIMITS: Record<CheckKind, number> = { mcq: 3, short: 1, code: 2 };
 
@@ -536,33 +578,44 @@ function friendlyError(error: unknown): string {
  * that mixed rows from two outlines once reached `ready` at 128 % coverage;
  * this check turns that into a failure the student can retry (the resume
  * logic then rewrites the mismatched rows).
+ *
+ * Playlist courses pass their video's row id: the check then only sees that
+ * video's modules (which tile 0 → its duration), and skips absolute position
+ * checks — global chapter numbering is assigned once at the end of the build.
  */
 async function assertCompleteCoverage(
   admin: SupabaseClient,
   courseId: string,
   duration: number,
+  courseVideoId: string | null = null,
 ): Promise<void> {
-  const [{ data: modules, error: moduleError }, { data: lessons, error: lessonError }] =
+  const playlist = courseVideoId !== null;
+  const [{ data: moduleData, error: moduleError }, { data: lessonData, error: lessonError }] =
     await Promise.all([
       admin
         .from("modules")
-        .select("id,position,start_seconds,end_seconds")
-        .eq("course_id", courseId)
-        .order("position"),
+        .select("id,position,start_seconds,end_seconds,course_video_id")
+        .eq("course_id", courseId),
       admin
         .from("lessons")
-        .select("id,module_id,position,start_seconds,end_seconds")
+        .select("id,module_id,position,start_seconds,end_seconds,course_video_id")
         .eq("course_id", courseId),
     ]);
 
   if (moduleError || lessonError) {
     throw new CoverageError(`could not read rows: ${moduleError?.message ?? lessonError?.message ?? ""}`);
   }
-  if (!modules || modules.length === 0) throw new CoverageError("no modules were saved");
+
+  const modules = ((moduleData ?? []) as { id: string; position: number; start_seconds: number; end_seconds: number; course_video_id: string | null }[])
+    .filter((row) => (row.course_video_id ?? null) === courseVideoId)
+    .sort((a, b) => (playlist ? a.start_seconds - b.start_seconds : a.position - b.position));
+  const lessons = (lessonData ?? []) as { id: string; module_id: string; position: number; start_seconds: number; end_seconds: number; course_video_id: string | null }[];
+
+  if (modules.length === 0) throw new CoverageError("no modules were saved");
 
   let cursor = 0;
   for (const [index, row] of modules.entries()) {
-    if (row.position !== index) throw new CoverageError(`module positions skip ${index}`);
+    if (!playlist && row.position !== index) throw new CoverageError(`module positions skip ${index}`);
     if (row.start_seconds !== cursor) {
       throw new CoverageError(
         row.start_seconds > cursor
@@ -582,14 +635,17 @@ async function assertCompleteCoverage(
   }
 
   const byModule = new Map<string, { position: number; start_seconds: number; end_seconds: number }[]>();
-  for (const lesson of lessons ?? []) {
+  for (const lesson of lessons) {
+    if ((lesson.course_video_id ?? null) !== courseVideoId) continue;
     const rows = byModule.get(lesson.module_id) ?? [];
     rows.push(lesson);
     byModule.set(lesson.module_id, rows);
   }
 
   for (const [index, row] of modules.entries()) {
-    const rows = (byModule.get(row.id) ?? []).sort((a, b) => a.position - b.position);
+    const rows = (byModule.get(row.id) ?? []).sort((a, b) =>
+      playlist ? a.start_seconds - b.start_seconds : a.position - b.position,
+    );
     if (rows.length === 0) throw new CoverageError(`module ${index + 1} has no sections`);
     if (
       rows.length < MIN_LESSONS_PER_MODULE &&
@@ -602,7 +658,7 @@ async function assertCompleteCoverage(
 
     let sectionCursor = row.start_seconds;
     for (const [position, lesson] of rows.entries()) {
-      if (lesson.position !== position) throw new CoverageError(`module ${index + 1} skips section ${position}`);
+      if (!playlist && lesson.position !== position) throw new CoverageError(`module ${index + 1} skips section ${position}`);
       if (lesson.start_seconds !== sectionCursor) {
         throw new CoverageError(
           lesson.start_seconds > sectionCursor
@@ -636,12 +692,13 @@ async function persistLesson(params: {
   admin: SupabaseClient;
   courseId: string;
   moduleId: string;
+  courseVideoId: string | null;
   position: number;
   outline: OutlineLesson;
   generated: GeneratedLesson;
   language: string;
 }) {
-  const { admin, courseId, moduleId, position, outline, generated, language } = params;
+  const { admin, courseId, moduleId, courseVideoId, position, outline, generated, language } = params;
   const title = generated.title || outline.title;
 
   const { data: lessonRow, error: lessonError } = await admin
@@ -649,6 +706,7 @@ async function persistLesson(params: {
     .insert({
       course_id: courseId,
       module_id: moduleId,
+      course_video_id: courseVideoId,
       position,
       title,
       summary: generated.summary,
@@ -740,37 +798,43 @@ async function persistLesson(params: {
 }
 
 /**
- * The full course build. Writes status transitions to Supabase so the
- * generating screen can follow along, and keeps every model call on the
- * background lane of the rate limiter.
+ * One video's full build: captions → topic map → outline → plans → sections.
+ * Shared by the single-video path and each video of a playlist course; throws
+ * to the caller, which marks the course (or that video's row) failed.
+ * Status transitions go to Supabase so the generating screen can follow along,
+ * and every model call stays on the background lane of the rate limiter.
  */
-export async function runCourseGeneration(params: {
-  courseId: string;
-  userId: string;
-  videoId: string;
-}): Promise<void> {
-  const { courseId, userId, videoId } = params;
-  const admin = createSupabaseAdminClient();
+async function buildVideo(params: BuildVideoParams): Promise<BuildVideoResult> {
+  const { admin, courseId, userId, videoId, courseVideoId, videoPosition, label, isPrimary } = params;
+  const playlist = courseVideoId !== null;
+  const stage = (text: string) => (label ? `${label}${text}` : text);
   // Once one module fails the build is over; in-flight sibling calls must not
   // keep writing rows into a course that is already marked failed.
   let aborted = false;
 
   try {
-    await setStatus(admin, courseId, { status: "fetching", stage: "Reading the captions", error: null });
+    await setStatus(admin, courseId, { status: "fetching", stage: stage("Reading the captions"), error: null });
 
     const lecture: Lecture = await loadLecture(videoId);
     const language = detectLanguage(lecture);
     const duration = lecture.durationSeconds || lecture.cues.at(-1)?.start || 0;
 
-    await setStatus(admin, courseId, {
-      title: lecture.title,
-      channel: lecture.channel,
-      description: lecture.description,
-      language,
-      duration_seconds: duration,
+    // A playlist course already has its title; only its first built video
+    // writes channel/language, and its duration is summed at the end.
+    const coursePatch: Record<string, unknown> = {
       status: "outlining",
-      stage: "Finding the structure",
-    });
+      stage: stage("Finding the structure"),
+    };
+    if (isPrimary) {
+      coursePatch.channel = lecture.channel;
+      coursePatch.language = language;
+    }
+    if (!playlist) {
+      coursePatch.title = lecture.title;
+      coursePatch.description = lecture.description;
+      coursePatch.duration_seconds = duration;
+    }
+    await setStatus(admin, courseId, coursePatch);
 
     const windows = buildWindows(lecture.cues, duration);
     let mapped = 0;
@@ -801,7 +865,7 @@ export async function runCourseGeneration(params: {
           // then would overwrite the failure message the student needs to see.
           if (!aborted) {
             await setStatus(admin, courseId, {
-              stage: `Read ${mapped} of ${windows.length} transcript windows`,
+              stage: stage(`Read ${mapped} of ${windows.length} transcript windows`),
             });
           }
 
@@ -873,10 +937,38 @@ export async function runCourseGeneration(params: {
       if (refined.modules.length > 0) outline = refined;
     }
 
+    // One episode = one chapter: a short playlist video's outline collapses
+    // into a single module (a video past the split threshold keeps the
+    // model's natural multi-chapter shape).
+    if (playlist && duration <= SPLIT_ABOVE_SECONDS && outline.modules.length > 1) {
+      const merged = normaliseOutline(
+        [
+          {
+            title: outline.modules
+              .map((module) => module.title)
+              .filter(Boolean)
+              .join(" / ")
+              .slice(0, 140),
+            summary: outline.modules.map((module) => module.summary).join(" ").slice(0, 600),
+            start: 0,
+            end: duration,
+            lessons: outline.modules.flatMap((module) => module.lessons),
+          },
+        ],
+        duration,
+      );
+      if (merged.length === 0) {
+        throw new Error("The episode outline could not be shaped into a single chapter.");
+      }
+      outline = { level: outline.level, modules: merged };
+    }
+
     await setStatus(admin, courseId, {
       status: "writing",
-      level: outline.level,
-      stage: `Planning ${outline.modules.length} modules`,
+      // Only the first built video sets the course level; episodes of the
+      // same playlist are all pitched the same way.
+      ...(playlist && !isPrimary ? {} : { level: outline.level }),
+      stage: stage(`Planning ${outline.modules.length} modules`),
     });
 
     // Assessment is planned per module before any prose is written, so each
@@ -923,23 +1015,32 @@ export async function runCourseGeneration(params: {
 
     // Module rows are cheap and stable: create them first so each section can
     // be written (and resumed) on its own.
-    const [{ data: existingModules }, { data: existingLessons }] = await Promise.all([
-      admin.from("modules").select("id,position,start_seconds,end_seconds").eq("course_id", courseId),
+    const [{ data: existingModuleData }, { data: existingLessons }] = await Promise.all([
+      admin.from("modules").select("id,position,start_seconds,end_seconds,course_video_id").eq("course_id", courseId),
       admin.from("lessons")
         .select("id,module_id,position,start_seconds,end_seconds")
         .eq("course_id", courseId),
     ]);
+
+    // Only this video's chapters are reuse/stale candidates here — another
+    // episode's rows must never be deleted by this build.
+    const existingModules = (
+      existingModuleData ?? []
+    ) as { id: string; position: number; start_seconds: number; end_seconds: number; course_video_id: string | null }[];
+    const scopedModules = existingModules.filter((row) => (row.course_video_id ?? null) === courseVideoId);
 
     // A row is only worth keeping when it describes the SAME slice of video as
     // the regenerated outline. Matching by position alone spliced rows from two
     // different outlines together: a retry kept the old modules (built by the
     // broken fallback, ending at 175 809 s) while the new ones started at
     // 104 050 s, and the course still reached `ready` at 128 % coverage.
+    // Playlist chapters are matched without position: their global numbers are
+    // only assigned at the end of the build.
     const reusableModule = (row: { position: number; start_seconds: number; end_seconds: number }, index: number) => {
       const planned = outline.modules[index];
       return (
         planned !== undefined &&
-        row.position === index &&
+        (playlist || row.position === index) &&
         row.start_seconds === planned.start &&
         row.end_seconds === planned.end
       );
@@ -947,16 +1048,43 @@ export async function runCourseGeneration(params: {
 
     // Everything else is stale — deleting a module cascades to its lessons and
     // their exercises, so old content can never survive a rebuilt timeline.
-    const staleModuleIds = (existingModules ?? [])
-      .filter((row) => !reusableModule(row, row.position))
+    const staleModuleIds = scopedModules
+      .filter((row) =>
+        playlist
+          ? !outline.modules.some(
+              (entry) => entry.start === row.start_seconds && entry.end === row.end_seconds,
+            )
+          : !reusableModule(row, row.position),
+      )
       .map((row) => row.id);
     if (staleModuleIds.length > 0) {
       await admin.from("modules").delete().in("id", staleModuleIds);
     }
 
+    // Playlist chapters sit in their video's slot (video N → N × 1_000 + local
+    // index): while a video is still queued its slot stays empty instead of a
+    // later video filling it, and one that builds late lands in the right
+    // place instead of after everything else. Slots are disjoint per video, so
+    // the (course_id, position) unique constraint always holds; global numbers
+    // are assigned once at the end of the build (finalisePlaylist).
+    //
+    // Survivors of a previous outline are parked at temporary negatives first:
+    // a regenerated outline can gain a chapter BEFORE one it reuses, and the
+    // fresh insert would otherwise land on the survivor's row. Each survivor
+    // is restored to its own outline index below. Playlist only — single-video
+    // courses match survivors by `row.position === index`, so parking them
+    // first would hide them from the reuse check (and they already sit at
+    // their exact index, so there is no collision to avoid there).
+    const survivors = scopedModules.filter((row) => !staleModuleIds.includes(row.id));
+    if (playlist) {
+      for (const [parkIndex, row] of survivors.entries()) {
+        await admin.from("modules").update({ position: -(parkIndex + 1_000_000) }).eq("id", row.id);
+      }
+    }
+
     const moduleIds: string[] = [];
     for (const [index, module] of outline.modules.entries()) {
-      const existing = (existingModules ?? []).find((row) => reusableModule(row, index));
+      const existing = survivors.find((row) => reusableModule(row, index));
       if (existing) {
         moduleIds.push(existing.id);
         continue;
@@ -966,7 +1094,8 @@ export async function runCourseGeneration(params: {
         .from("modules")
         .insert({
           course_id: courseId,
-          position: index,
+          course_video_id: courseVideoId,
+          position: playlist ? videoPosition * 1_000 + index : index,
           title: module.title,
           summary: module.summary,
           start_seconds: module.start,
@@ -981,15 +1110,26 @@ export async function runCourseGeneration(params: {
       moduleIds.push((data as { id: string }).id);
     }
 
+    // Un-park the reused chapters at their outline index inside the slot.
+    for (const [index, id] of moduleIds.entries()) {
+      if (!survivors.some((row) => row.id === id)) continue;
+      await admin
+        .from("modules")
+        .update({ position: videoPosition * 1_000 + index })
+        .eq("id", id);
+    }
+
     // Sections that no longer exist in the outline (or belong to a module that
     // was dropped) would show up as orphans in the player. A section whose
     // window moved is just as stale as a missing one: its notes were written
-    // for different minutes of the lecture.
+    // for different minutes of the lecture. Playlist courses only judge their
+    // own video's sections here — another episode's rows are not this build's
+    // business.
     const modulePosition = new Map(moduleIds.map((id, index) => [id, index]));
     const staleLessonIds = (existingLessons ?? [])
       .filter((row) => {
         const index = modulePosition.get(row.module_id);
-        if (index === undefined) return true;
+        if (index === undefined) return !playlist;
         const lesson = outline.modules[index].lessons[row.position];
         if (lesson === undefined) return true;
         return row.start_seconds !== lesson.start || row.end_seconds !== lesson.end;
@@ -1028,7 +1168,7 @@ export async function runCourseGeneration(params: {
     );
     let chaptersWritten = pendingPerModule.filter((count) => count === 0).length;
     const stageLine = () =>
-      `Writing ${written} of ${totalLessons} sections · ${chaptersWritten} of ${outline.modules.length} chapters written`;
+      stage(`Writing ${written} of ${totalLessons} sections · ${chaptersWritten} of ${outline.modules.length} chapters written`);
 
     await setStatus(admin, courseId, { stage: stageLine() });
 
@@ -1103,6 +1243,7 @@ export async function runCourseGeneration(params: {
                 admin,
                 courseId,
                 moduleId,
+                courseVideoId,
                 position: lessonIndex,
                 outline: lesson,
                 generated,
@@ -1123,23 +1264,437 @@ export async function runCourseGeneration(params: {
 
     await Promise.all(jobs);
 
-    // Nothing may ship as `ready` unless the rows in the database tile the
+    // Nothing may ship as complete unless the rows in the database tile the
     // whole video — the in-memory outline already does, but a resumed attempt
-    // can leave stale rows behind it.
-    await assertCompleteCoverage(admin, courseId, duration);
+    // can leave stale rows behind it. Playlist courses check only this video's
+    // rows (global numbering happens at finalise).
+    await assertCompleteCoverage(admin, courseId, duration, courseVideoId);
 
+    return { language, level: outline.level, duration, chapters: outline.modules.length, sections: totalLessons };
+  } catch (error) {
+    aborted = true;
+    console.error(`[generation] course ${courseId} video ${videoId} failed`, error);
+    throw error;
+  }
+}
+
+/**
+ * Single entry point of the background job. Playlist courses (rows in
+ * course_videos) fan out to one build per video; everything else keeps the
+ * original single-video path.
+ */
+export async function runCourseGeneration(params: {
+  courseId: string;
+  userId: string;
+  videoId: string;
+}): Promise<void> {
+  const { courseId, userId, videoId } = params;
+  const admin = createSupabaseAdminClient();
+
+  const { data: videos, error: videosError } = await admin
+    .from("course_videos")
+    .select("id,position,video_id,title,duration_seconds,status,attempts,error")
+    .eq("course_id", courseId)
+    .order("position");
+
+  if (videosError) {
+    await setStatus(admin, courseId, { status: "failed", stage: "Generation failed", error: videosError.message });
+    return;
+  }
+
+  if (videos && videos.length > 0) {
+    await runPlaylistGeneration({ admin, courseId, userId, videos: videos as CourseVideoRow[] });
+    return;
+  }
+
+  // ---- single-video path (unchanged behaviour) ----
+  try {
+    const result = await buildVideo({
+      admin,
+      courseId,
+      userId,
+      videoId,
+      courseVideoId: null,
+      videoPosition: 0,
+      label: "",
+      isPrimary: true,
+    });
     await setStatus(admin, courseId, {
       status: "ready",
-      stage: `${outline.modules.length} modules · ${totalLessons} sections`,
+      stage: `${result.chapters} modules · ${result.sections} sections`,
       error: null,
     });
   } catch (error) {
-    aborted = true;
-    console.error(`[generation] course ${courseId} failed`, error);
     await setStatus(admin, courseId, {
       status: "failed",
       stage: "Generation failed",
       error: friendlyError(error),
     });
   }
+}
+
+/** Caption requests back-to-back are what earns YouTube's 429 — pace every video. */
+const VIDEO_PACE_MS = 3_000;
+/** A throttled caption fetch is waited out in place: the error itself asks for minutes. */
+const RATE_LIMIT_WAIT_MS = 60_000;
+/** In-place waits per video per run before leaving it queued for a later run. */
+const RATE_LIMIT_WAITS = 2;
+
+/**
+ * Old builds appended chapter numbers in build order, so a resumed run could
+ * drop a fresh chapter into a slot another video already holds — the unique
+ * (course_id, position) constraint would then fail the build. Move every
+ * chapter to its video's slot first. Two phases (unique negatives, then the
+ * real targets), so rows never clash mid-swap; rows already in place stay.
+ */
+async function normaliseChapterSlots(
+  admin: SupabaseClient,
+  courseId: string,
+  videos: CourseVideoRow[],
+): Promise<void> {
+  const { data: rows, error } = await admin
+    .from("modules")
+    .select("id,course_video_id,start_seconds,position")
+    .eq("course_id", courseId);
+  if (error || !rows || rows.length === 0) return;
+
+  type ModuleRow = {
+    id: string;
+    course_video_id: string | null;
+    start_seconds: number;
+    position: number;
+  };
+  const moduleRows = rows as ModuleRow[];
+
+  const slotByVideo = new Map(videos.map((video) => [video.id, video.position * 1_000]));
+  const byVideo = new Map<string, ModuleRow[]>();
+  for (const row of moduleRows) {
+    if (!row.course_video_id || !slotByVideo.has(row.course_video_id)) continue;
+    const list = byVideo.get(row.course_video_id) ?? [];
+    list.push(row);
+    byVideo.set(row.course_video_id, list);
+  }
+
+  const targetById = new Map<string, number>();
+  for (const [videoId, list] of byVideo) {
+    const slot = slotByVideo.get(videoId) ?? 0;
+    [...list]
+      .sort((a, b) => a.start_seconds - b.start_seconds)
+      .forEach((row, index) => targetById.set(row.id, slot + index));
+  }
+
+  const movers = moduleRows.filter((row) => {
+    const target = targetById.get(row.id);
+    return target !== undefined && target !== row.position;
+  });
+  if (movers.length === 0) return;
+
+  for (const [index, row] of movers.entries()) {
+    await admin.from("modules").update({ position: -(index + 1_000_000) }).eq("id", row.id);
+  }
+  for (const row of movers) {
+    await admin.from("modules").update({ position: targetById.get(row.id) as number }).eq("id", row.id);
+  }
+}
+
+/** One run over a playlist's work queue: build each queued video in order. */
+async function runPlaylistGeneration(params: {
+  admin: SupabaseClient;
+  courseId: string;
+  userId: string;
+  videos: CourseVideoRow[];
+}): Promise<void> {
+  const { admin, courseId, userId, videos } = params;
+  const total = videos.length;
+
+  await normaliseChapterSlots(admin, courseId, videos);
+
+  // Mutable queue: a video that fails its first try goes back in and gets its
+  // second try within the same run.
+  const queue = videos.filter((video) => video.status === "queued" || video.status === "building");
+  let doneCount = videos.filter((video) => video.status === "done").length;
+  let lastError: string | null = null;
+  // One tail re-queue per throttled video per run, counted across visits.
+  const throttledRequeues = new Map<string, number>();
+
+  for (const video of queue) {
+    const label = `Video ${video.position + 1} of ${total} · `;
+    // Strikes count real build failures only — a YouTube 429 never burns one.
+    let attempts = video.attempts;
+    let rateLimitWaits = 0;
+
+    // A throttled caption fetch is retried in place: waiting is what the error
+    // asks for, and deferring the video to the tail of the queue would hit the
+    // same rate limit again while later videos fill its chapter slot.
+    for (;;) {
+      await admin
+        .from("course_videos")
+        .update({ status: "building", attempts, error: null })
+        .eq("id", video.id);
+      await setStatus(admin, courseId, { status: "fetching", stage: `${label}Reading the captions`, error: null });
+
+      try {
+        const result = await buildVideo({
+          admin,
+          courseId,
+          userId,
+          videoId: video.video_id,
+          courseVideoId: video.id,
+          videoPosition: video.position,
+          label,
+          isPrimary: doneCount === 0,
+        });
+        await admin
+          .from("course_videos")
+          .update({ status: "done", duration_seconds: result.duration, error: null })
+          .eq("id", video.id);
+        doneCount += 1;
+        break;
+      } catch (error) {
+        const message = friendlyError(error);
+        lastError = message;
+        console.error(`[generation] playlist video ${video.video_id} failed`, error);
+        const throttled = error instanceof TranscriptError && error.code === "rate-limited";
+
+        if (throttled && rateLimitWaits < RATE_LIMIT_WAITS) {
+          rateLimitWaits += 1;
+          const waitSeconds = (RATE_LIMIT_WAIT_MS * rateLimitWaits) / 1_000;
+          await setStatus(admin, courseId, {
+            stage: `${label}YouTube is rate-limiting captions — waiting ${waitSeconds}s`,
+          });
+          await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_WAIT_MS * rateLimitWaits));
+          continue;
+        }
+
+        if (!throttled) attempts += 1;
+        const exhausted = !throttled && attempts >= 2;
+        await admin
+          .from("course_videos")
+          .update({ status: exhausted ? "failed" : "queued", error: message })
+          .eq("id", video.id);
+
+        if (throttled) {
+          // One more chance at the tail of the run; if that fails too the
+          // video stays queued — a rate limit is never a permanent failure,
+          // so a later run finishes it and finalisePlaylist never drops it.
+          const requeues = throttledRequeues.get(video.id) ?? 0;
+          if (requeues < 1) {
+            throttledRequeues.set(video.id, requeues + 1);
+            queue.push({ ...video, status: "queued" });
+          }
+        } else if (!exhausted) {
+          queue.push({ ...video, status: "queued", attempts });
+        }
+        break;
+      }
+    }
+
+    // Caption requests back-to-back are what earns the 429 — pace every video.
+    await new Promise((resolve) => setTimeout(resolve, VIDEO_PACE_MS));
+  }
+
+  if (doneCount === 0) {
+    await setStatus(admin, courseId, {
+      status: "failed",
+      stage: "Generation failed",
+      error: lastError ?? "No videos could be built.",
+    });
+    return;
+  }
+
+  // Videos still queued are the throttled ones whose waits ran out. Marking
+  // the course ready now would ship it without them forever — "Try again" is
+  // the only thing that restarts a job, and it only shows on `failed`. The
+  // retry picks the queued rows straight back up; a permanently broken video
+  // is `failed` here, not `queued`, so it never blocks finalise.
+  const { data: endRows } = await admin
+    .from("course_videos")
+    .select("id,status")
+    .eq("course_id", courseId);
+  const pending = (endRows ?? []).filter(
+    (row) => row.status === "queued" || row.status === "building",
+  ).length;
+  if (pending > 0) {
+    await setStatus(admin, courseId, {
+      status: "failed",
+      stage: "Generation stopped",
+      error: `YouTube kept rate-limiting captions, so ${pending} video${pending === 1 ? "" : "s"} did not finish. Wait a few minutes, then try again — the videos already built are kept.`,
+    });
+    return;
+  }
+
+  await finalisePlaylist(admin, courseId);
+}
+
+/**
+ * The end of a playlist build: drop chapters of videos that failed for good,
+ * fold videos shorter than five minutes into a neighbouring chapter, then
+ * number chapters and sections globally (playlist order, then start time) and
+ * mark the course ready.
+ */
+async function finalisePlaylist(admin: SupabaseClient, courseId: string): Promise<void> {
+  const { data: videoRows } = await admin
+    .from("course_videos")
+    .select("id,position,status,duration_seconds")
+    .eq("course_id", courseId)
+    .order("position");
+  const videos = (videoRows ?? []) as { id: string; position: number; status: string; duration_seconds: number }[];
+  const done = videos.filter((video) => video.status === "done");
+
+  // Chapters of videos that failed after their retries are removed entirely —
+  // a half-built chapter would break the coverage tiling.
+  const failedIds = videos.filter((video) => video.status !== "done").map((video) => video.id);
+  if (failedIds.length > 0) {
+    await admin.from("modules").delete().in("course_video_id", failedIds);
+  }
+
+  // Real durations: buildVideo knows the caption duration, the queue row may
+  // only have the flat-playlist estimate (0 when unknown).
+  const { data: moduleRows } = await admin
+    .from("modules")
+    .select("id,course_video_id,start_seconds,end_seconds")
+    .eq("course_id", courseId);
+  const modules = (moduleRows ?? []) as {
+    id: string;
+    course_video_id: string | null;
+    start_seconds: number;
+    end_seconds: number;
+  }[];
+
+  const durationByVideo = new Map<string, number>();
+  for (const row of modules) {
+    if (!row.course_video_id) continue;
+    durationByVideo.set(
+      row.course_video_id,
+      Math.max(durationByVideo.get(row.course_video_id) ?? 0, row.end_seconds),
+    );
+  }
+  for (const video of done) {
+    const duration = durationByVideo.get(video.id) ?? video.duration_seconds;
+    if (duration !== video.duration_seconds) {
+      await admin.from("course_videos").update({ duration_seconds: duration }).eq("id", video.id);
+      video.duration_seconds = duration;
+    }
+  }
+
+  // A video shorter than five minutes cannot carry its own chapter (its
+  // section would break the five-minute floor): move its sections into the
+  // previous video's last chapter, else the next video's first. The sections
+  // keep their own video and local timestamps — only the chapter they sit in
+  // changes — so clicking one still plays the right video at the right time.
+  // The video row stays too: lessons reference it (deleting it would cascade).
+  const byVideo = new Map<string, typeof modules>();
+  for (const row of modules) {
+    if (!row.course_video_id) continue;
+    const list = byVideo.get(row.course_video_id) ?? [];
+    list.push(row);
+    byVideo.set(row.course_video_id, list);
+  }
+
+  const order = [...done].sort((a, b) => a.position - b.position);
+  for (const [index, video] of order.entries()) {
+    const duration = durationByVideo.get(video.id) ?? video.duration_seconds;
+    if (duration >= 5 * 60 || duration === 0) continue;
+
+    const own = (byVideo.get(video.id) ?? []).sort((a, b) => a.start_seconds - b.start_seconds);
+    if (own.length === 0) continue; // already folded by an earlier run
+
+    // Target: previous video's last chapter, else the next video's first —
+    // skipping videos that no longer hold chapters of their own.
+    let target: (typeof modules)[number] | undefined;
+    for (let i = index - 1; i >= 0 && !target; i--) {
+      target = (byVideo.get(order[i].id) ?? []).sort((a, b) => a.start_seconds - b.start_seconds).at(-1);
+    }
+    for (let i = index + 1; i < order.length && !target; i++) {
+      target = (byVideo.get(order[i].id) ?? []).sort((a, b) => a.start_seconds - b.start_seconds)[0];
+    }
+    if (!target) continue;
+
+    // Re-parent section by section, parking each at a spare negative
+    // position: (module_id, position) is unique and the host chapter already
+    // holds 0, 1, 2 … The final renumber below rewrites them properly.
+    const { data: ownLessonRows } = await admin
+      .from("lessons")
+      .select("id")
+      .in(
+        "module_id",
+        own.map((row) => row.id),
+      );
+    for (const [lessonIndex, lesson] of (ownLessonRows ?? []).entries()) {
+      await admin
+        .from("lessons")
+        .update({ module_id: target.id, position: -(video.position * 1_000 + lessonIndex + 100_000_000) })
+        .eq("id", (lesson as { id: string }).id);
+    }
+
+    await admin.from("modules").delete().in(
+      "id",
+      own.map((row) => row.id),
+    );
+    byVideo.set(video.id, []); // this video no longer owns chapters
+  }
+
+  // Global numbering: chapters in playlist order (folded rows follow their
+  // target video), sections by start time inside each chapter. Two phases —
+  // temporary negative positions first, so (course_id, position) never clashes
+  // while rows swap places.
+  const { data: finalModuleRows } = await admin
+    .from("modules")
+    .select("id,course_video_id,start_seconds")
+    .eq("course_id", courseId);
+  const finalModules = ((finalModuleRows ?? []) as { id: string; course_video_id: string | null; start_seconds: number }[])
+    .map((row) => {
+      const video = row.course_video_id ? done.find((entry) => entry.id === row.course_video_id) : undefined;
+      return { ...row, videoOrder: video?.position ?? Number.MAX_SAFE_INTEGER };
+    })
+    .sort((a, b) => a.videoOrder - b.videoOrder || a.start_seconds - b.start_seconds);
+
+  for (const [index, module] of finalModules.entries()) {
+    if (index === 0) continue;
+    await admin.from("modules").update({ position: -(index + 1_000_000) }).eq("id", module.id);
+  }
+  for (const [index, module] of finalModules.entries()) {
+    await admin.from("modules").update({ position: index }).eq("id", module.id);
+  }
+
+  const moduleIds = finalModules.map((module) => module.id);
+  const { data: finalLessonRows } = await admin
+    .from("lessons")
+    .select("id,module_id,start_seconds,course_video_id")
+    .eq("course_id", courseId)
+    .in("module_id", moduleIds);
+  const videoPosition = new Map(done.map((video) => [video.id, video.position]));
+  const lessonsByModule = new Map<string, { id: string; start_seconds: number; course_video_id: string | null }[]>();
+  for (const lesson of finalLessonRows ?? []) {
+    const rows = lessonsByModule.get(lesson.module_id) ?? [];
+    rows.push(lesson);
+    lessonsByModule.set(lesson.module_id, rows);
+  }
+  for (const rows of lessonsByModule.values()) {
+    // Playlist order first (a folded short video's sections follow their own
+    // video), then local start time.
+    const sorted = [...rows].sort(
+      (a, b) =>
+        (videoPosition.get(a.course_video_id ?? "") ?? Number.MAX_SAFE_INTEGER) -
+          (videoPosition.get(b.course_video_id ?? "") ?? Number.MAX_SAFE_INTEGER) ||
+        a.start_seconds - b.start_seconds,
+    );
+    for (const [index, lesson] of sorted.entries()) {
+      if (index === 0) continue;
+      await admin.from("lessons").update({ position: -(index + 1_000_000) }).eq("id", lesson.id);
+    }
+    for (const [index, lesson] of sorted.entries()) {
+      await admin.from("lessons").update({ position: index }).eq("id", lesson.id);
+    }
+  }
+
+  const duration = done.reduce((sum, video) => sum + video.duration_seconds, 0);
+  const sections = (finalLessonRows ?? []).length;
+
+  await setStatus(admin, courseId, {
+    status: "ready",
+    stage: `${done.length} of ${videos.length} videos built · ${finalModules.length} chapters · ${sections} sections`,
+    duration_seconds: duration,
+    error: null,
+  });
 }

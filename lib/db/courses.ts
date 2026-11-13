@@ -113,10 +113,16 @@ function tilesRange(
   return cursor === module.end_seconds;
 }
 
+type VideoInfo = { videoId: string; done: boolean };
+
 function buildChapters(
   modules: ModuleRow[],
   lessons: LessonRow[],
   exercises: ExerciseRow[],
+  /** course_videos rows by id; empty on single-video courses. */
+  videos: Map<string, VideoInfo>,
+  /** The course's own video id — fallback for every section. */
+  courseVideoId: string,
 ): Chapter[] {
   const exercisesByLesson = new Map<string, ExerciseRow[]>();
   for (const row of exercises) {
@@ -133,7 +139,12 @@ function buildChapters(
     return {
       id: module.id,
       title: module.title,
-      written: tilesRange(module, moduleLessons),
+      // Playlist chapters belong to a video: written once that video finished
+      // building (a merged chapter can hold sections of two videos, so tiling
+      // would lie). Single-video chapters keep the tiling check.
+      written: module.course_video_id
+        ? videos.get(module.course_video_id)?.done ?? false
+        : tilesRange(module, moduleLessons),
       lessons: moduleLessons.map((lesson) => {
         const rows = byPosition(exercisesByLesson.get(lesson.id) ?? []);
         const questions = rows.filter((row) => row.kind === "mcq").map(mcqFrom);
@@ -145,6 +156,9 @@ function buildChapters(
           title: lesson.title,
           start: lesson.start_seconds,
           end: lesson.end_seconds,
+          videoId:
+            (lesson.course_video_id ? videos.get(lesson.course_video_id)?.videoId : undefined) ??
+            courseVideoId,
           summary: lesson.summary,
           keyTerms: Array.isArray(lesson.key_terms) ? lesson.key_terms : [],
           notes: Array.isArray(lesson.notes) ? lesson.notes : [],
@@ -183,6 +197,7 @@ export async function getCourseBundle(
     { data: exerciseData },
     { data: progressData },
     { data: quizData, error: quizError },
+    { data: videoData },
   ] = await Promise.all([
     supabase.from("modules").select("*").eq("course_id", courseRow.id),
     supabase.from("lessons").select("*").eq("course_id", courseRow.id),
@@ -197,6 +212,7 @@ export async function getCourseBundle(
       .select("module_id,best_score,attempts,passed")
       .eq("user_id", userId)
       .eq("course_id", courseRow.id),
+    supabase.from("course_videos").select("id,video_id,status").eq("course_id", courseRow.id),
   ]);
 
   // A database that has not run the latest schema.sql has no chapter_quizzes
@@ -204,6 +220,13 @@ export async function getCourseBundle(
   if (quizError && !/does not exist|schema cache/i.test(quizError.message)) {
     console.warn("[courses] could not load chapter quizzes", quizError.message);
   }
+
+  const videos = new Map<string, VideoInfo>(
+    ((videoData ?? []) as { id: string; video_id: string; status: string }[]).map((row) => [
+      row.id,
+      { videoId: row.video_id, done: row.status === "done" },
+    ]),
+  );
 
   const course: Course = {
     id: courseRow.id,
@@ -217,6 +240,8 @@ export async function getCourseBundle(
       (moduleData ?? []) as ModuleRow[],
       (lessonData ?? []) as LessonRow[],
       (exerciseData ?? []) as ExerciseRow[],
+      videos,
+      courseRow.video_id,
     ),
     seeded: {},
     status: courseRow.status,
@@ -255,19 +280,24 @@ export async function listCourseSummaries(
 
   const courseIds = courses.map((course) => course.id);
 
-  const [{ data: moduleData }, { data: lessonData }, { data: progressData }] = await Promise.all([
-    supabase.from("modules").select("*").in("course_id", courseIds),
-    supabase.from("lessons").select("*").in("course_id", courseIds),
-    supabase
-      .from("lesson_progress")
-      .select("course_id,lesson_id,score,correct,total")
-      .eq("user_id", userId)
-      .in("course_id", courseIds),
-  ]);
+  const [{ data: moduleData }, { data: lessonData }, { data: progressData }, { data: videoData }] =
+    await Promise.all([
+      supabase.from("modules").select("*").in("course_id", courseIds),
+      supabase.from("lessons").select("*").in("course_id", courseIds),
+      supabase
+        .from("lesson_progress")
+        .select("course_id,lesson_id,score,correct,total")
+        .eq("user_id", userId)
+        .in("course_id", courseIds),
+      supabase.from("course_videos").select("id,video_id").in("course_id", courseIds),
+    ]);
 
   const modules = (moduleData ?? []) as ModuleRow[];
   const lessons = (lessonData ?? []) as LessonRow[];
   const progress = (progressData ?? []) as ProgressRow[];
+  const videoIds = new Map(
+    ((videoData ?? []) as { id: string; video_id: string }[]).map((row) => [row.id, row.video_id]),
+  );
   const completed = await listProjectCompletions(supabase, userId, courseIds);
 
   return courses.map((courseRow) => {
@@ -283,6 +313,9 @@ export async function listCourseSummaries(
         title: lesson.title,
         start: lesson.start_seconds,
         end: lesson.end_seconds,
+        videoId:
+          (lesson.course_video_id ? videoIds.get(lesson.course_video_id) : undefined) ??
+          courseRow.video_id,
         summary: lesson.summary,
         keyTerms: [],
         notes: [],

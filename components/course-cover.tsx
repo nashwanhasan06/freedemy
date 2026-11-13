@@ -56,6 +56,10 @@ export function CourseCover({
   priority?: boolean;
 }) {
   const tone = toneFor(course);
+  // Playlist courses store the playlist id on the course, which has no
+  // thumbnail — lead with the first section's own video instead.
+  const coverId = course.chapters.flatMap((chapter) => chapter.lessons)[0]?.videoId ?? course.videoId;
+  const hasThumbnail = /^[A-Za-z0-9_-]{11}$/.test(coverId);
 
   return (
     <div
@@ -64,14 +68,16 @@ export function CourseCover({
         backgroundImage: `linear-gradient(135deg, ${tone.from} 0%, ${tone.to} 100%)`,
       }}
     >
-      <Image
-        src={`https://i.ytimg.com/vi/${course.videoId}/hqdefault.jpg`}
-        alt=""
-        fill
-        sizes={sizes}
-        priority={priority}
-        className="object-cover"
-      />
+      {hasThumbnail && (
+        <Image
+          src={`https://i.ytimg.com/vi/${coverId}/hqdefault.jpg`}
+          alt=""
+          fill
+          sizes={sizes}
+          priority={priority}
+          className="object-cover"
+        />
+      )}
       {/* Keeps bright thumbnail artwork from glaring against the card. */}
       <div className="absolute inset-0 bg-gradient-to-t from-black/20 via-transparent to-transparent" />
     </div>

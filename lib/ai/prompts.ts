@@ -193,6 +193,8 @@ Notes are the study material, so they carry most of the value:
 Assessment rules:
 - Follow the plan exactly: one exercise per planned check, in the planned order, using the planned form and focus. mcq go in "questions", the short check in "shortAnswer", code checks in "codeExercises".
 - If the plan has no short check, "shortAnswer" is null. If it has no code check, "codeExercises" is [].
+- Ground every exercise in this section's own notes: the ideas, worked examples and edge cases those notes cover, so it belongs unmistakably to this section and reaches nothing beyond it.
+- Keep it indirect: ask the student to apply, predict, trace or debug those ideas rather than repeat the notes' wording, definition or example back.
 - mcq: four plausible options, exactly one correct "answer" index, a "misconception" naming the belief behind the most likely wrong pick, an "explanation" for after they answer.
 - short: 3 to 5 keywords any good answer would contain, and a model answer of 2 to 4 sentences.
 - code: a runnable "starterCode" stub with a TODO, a complete correct "solution", a one-sentence "hint" and an "explanation" of what it teaches. Under 20 lines, directly from this lesson.

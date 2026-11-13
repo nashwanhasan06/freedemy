@@ -23,6 +23,8 @@ export type CourseRow = {
 export type ModuleRow = {
   id: string;
   course_id: string;
+  /** Playlist video this chapter belongs to; null on single-video courses. */
+  course_video_id: string | null;
   position: number;
   title: string;
   summary: string;
@@ -34,6 +36,8 @@ export type LessonRow = {
   id: string;
   course_id: string;
   module_id: string;
+  /** Playlist video this section plays in; null on single-video courses. */
+  course_video_id: string | null;
   position: number;
   title: string;
   summary: string;

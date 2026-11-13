@@ -75,6 +75,10 @@ export function CoursePlayer({
     return () => {
       disposed = true;
       playerRef.current = null;
+      // The section-follow effect below keys off `ready`; without flipping it
+      // back the new player's onReady is a no-op state-wise and the selected
+      // section's seek never runs — a cross-video jump would sit at 0:00.
+      setReady(false);
       try {
         player?.destroy();
       } catch {
@@ -103,23 +107,59 @@ export function CoursePlayer({
     setStarted(true);
   }, [ready, lesson.id, lesson.start, playerRef]);
 
-  // Stop at the end of the section instead of letting the video run on.
+  // Hold the section boundary: stop — or advance — when playback reaches the
+  // section's end, so the section on screen always matches the video.
   useEffect(() => {
     if (!ready) return;
 
+    // A fresh effect means the auto-advance rules may have changed (e.g. a
+    // rigorous assignment passed while we sat paused at the boundary), so the
+    // boundary counts as unhandled again.
+    finishedRef.current = false;
+
     const interval = window.setInterval(() => {
       const player = playerRef.current;
-      if (!player || finishedRef.current) return;
+      if (!player) return;
 
+      const state = player.getPlayerState();
+      // The clip's last frame can land a fraction before lesson.end (duration
+      // metadata rounds up), so an ENDED player counts as past the boundary —
+      // otherwise the final section of every video would never advance.
+      const ended = state === 0; // YT.PlayerState.ENDED
+      const playing = state === 1; // YT.PlayerState.PLAYING
       const current = player.getCurrentTime();
-      if (current >= lesson.end - 0.25) {
-        finishedRef.current = true;
-        player.pauseVideo();
 
-        if (autoPlayNext && hasNext) {
-          onNext();
-        }
+      if (!ended && current < lesson.end - 0.25) {
+        finishedRef.current = false; // back inside the section: re-arm
+        return;
       }
+
+      if (autoPlayNext) {
+        if (finishedRef.current) return; // the boundary is already handled
+        finishedRef.current = true;
+        if (!ended) player.pauseVideo();
+        // Hand the boundary to the workspace: it advances into an open
+        // section, swaps in the next section's lock screen when rigorous
+        // mode has it sealed, opens the chapter exam when that is the way
+        // through, and does nothing at the end of the course.
+        onNext();
+        return;
+      }
+
+      // Auto-play off and the student resumed past a boundary we stopped
+      // them at: follow the video into the next section instead of letting
+      // it run on with the section UI left behind. Re-arm first so a tick
+      // that lands before the re-render can never advance twice.
+      if (!autoPlayNext && finishedRef.current && playing && hasNext) {
+        finishedRef.current = false;
+        onNext();
+        return;
+      }
+
+      // Nothing to advance into (auto-play off, last section, or the next
+      // section sealed): hold the boundary — resuming must not desync.
+      if (!ended) player.pauseVideo();
+      finishedRef.current = true;
     }, 250);
 
     return () => window.clearInterval(interval);

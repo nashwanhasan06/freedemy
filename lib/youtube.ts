@@ -10,6 +10,8 @@ export type YouTubePlayer = {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
   getCurrentTime: () => number;
   getDuration: () => number;
+  /** YT.PlayerState: -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued. */
+  getPlayerState: () => number;
   destroy: () => void;
   loadVideoById: (options: { videoId: string; startSeconds?: number }) => void;
 };

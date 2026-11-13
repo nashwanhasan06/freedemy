@@ -79,6 +79,10 @@ export function GeneratingPipeline({ courseId }: { courseId: string }) {
   const [course, setCourse] = useState<CourseStatus | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  // Bumped after a retry so the poller restarts: a "failed" status is treated
+  // as terminal by the effect below, and the action redirects to this very
+  // URL, so nothing else would ever refresh the view.
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -133,7 +137,7 @@ export function GeneratingPipeline({ courseId }: { courseId: string }) {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [courseId, router]);
+  }, [courseId, router, retryNonce]);
 
   const failed = course?.status === "failed";
   const active = course ? stepIndex(course.status) : 0;
@@ -251,7 +255,15 @@ export function GeneratingPipeline({ courseId }: { courseId: string }) {
                       disabled={retrying}
                       onClick={() => {
                         setRetrying(true);
-                        void retryCourseAction(courseId).finally(() => setRetrying(false));
+                        void retryCourseAction(courseId)
+                          .catch(() => {
+                            // The server may have run anyway — a fresh poll
+                            // shows the truth either way.
+                          })
+                          .finally(() => {
+                            setRetrying(false);
+                            setRetryNonce((nonce) => nonce + 1);
+                          });
                       }}
                     >
                       {retrying ? (

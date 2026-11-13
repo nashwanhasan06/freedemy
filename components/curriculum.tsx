@@ -1,5 +1,7 @@
 "use client";
 
+import { useMemo, useState } from "react";
+
 import { CheckCircle2, Circle, ClipboardList, Lock, Play, ShieldCheck } from "lucide-react";
 
 import {
@@ -35,10 +37,37 @@ export function Curriculum({
   onSelect,
   onExam,
 }: CurriculumProps) {
+  const chapterIds = useMemo(
+    () => course.chapters.map((chapter) => chapter.id),
+    [course.chapters],
+  );
+
+  // Controlled open state: an uncontrolled `defaultValue` re-serialized on
+  // every refresh trips Base UI's "changed the default value" warning as soon
+  // as the chapter list differs — a course switch or a build writing a new
+  // chapter. Sections start expanded so a deep link to any lesson is visible
+  // immediately; ids that vanish are dropped and newly written chapters join
+  // expanded, while a student's own toggles survive a refresh. The chapter
+  // list is reconciled during render (react.dev: storing information from
+  // previous renders) rather than in an effect.
+  const [openIds, setOpenIds] = useState<string[]>(chapterIds);
+  const [prevChapterIds, setPrevChapterIds] = useState(chapterIds);
+  if (prevChapterIds !== chapterIds) {
+    const known = new Set(chapterIds);
+    const kept = openIds.filter((id) => known.has(id));
+    const added = chapterIds.filter((id) => !openIds.includes(id));
+    setPrevChapterIds(chapterIds);
+    setOpenIds(
+      kept.length === openIds.length && added.length === 0
+        ? openIds
+        : [...kept, ...added],
+    );
+  }
+
   return (
     <Accordion
-      // Sections start expanded so a deep link to any lesson is visible immediately.
-      defaultValue={course.chapters.map((chapter) => chapter.id)}
+      value={openIds}
+      onValueChange={(next) => setOpenIds(next as string[])}
       className="w-full"
     >
       {course.chapters.map((chapter, index) => {
