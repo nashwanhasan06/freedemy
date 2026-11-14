@@ -191,9 +191,13 @@ async function loadWithYtDlp(videoId: string): Promise<Lecture | null> {
             // Ask for exactly one track. Every extra subtitle request counts
             // against YouTube's timedtext rate limit, and asking for several
             // languages (or translated variants) is the usual way to earn a
-            // 429. "en" is the original English auto/manual track.
+            // 429. Plain "en" is too strict: some channels (e.g. NPTEL) only
+            // publish regional tracks like "en-IN-…", which then read as
+            // "no English captions". "en.*" covers regional originals while
+            // the lookahead drops translated duplicates like "en-en-IN-…"
+            // (a second track per video = a second timedtext request).
             "--sub-langs",
-            "en",
+            "en(?!-en).*",
             "--sub-format",
             "json3",
             "--write-info-json",

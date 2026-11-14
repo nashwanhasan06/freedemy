@@ -8,9 +8,9 @@ import { YTDLP, YTDLP_COOKIES, YTDLP_PROXY } from "@/lib/ai/transcript";
 const execFileAsync = promisify(execFile);
 
 /** A playlist longer than this is refused at paste time, not mid-build. */
-export const MAX_PLAYLIST_VIDEOS = 50;
-/** ~50 hours of video: one course has to be finishable. */
-export const MAX_PLAYLIST_SECONDS = 50 * 60 * 60;
+export const MAX_PLAYLIST_VIDEOS = 100;
+/** ~70 hours of video: one course has to be finishable. */
+export const MAX_PLAYLIST_SECONDS = 70 * 60 * 60;
 
 export type PlaylistEntry = {
   videoId: string;
@@ -29,6 +29,45 @@ export class PlaylistError extends Error {
     super(message);
     this.name = "PlaylistError";
   }
+}
+
+/** The episode number a title carries ("Lec 12", "Part 02", "12. Title"), or null. */
+function lectureNumber(title: string): number | null {
+  const keyword =
+    /(?:lec(?:ture)?|lesson|ep(?:isode)?|part|section|session|video|class|day|week|chapter)\s*[-#:.]?\s*(\d{1,3})\b/i.exec(
+      title,
+    );
+  if (keyword) return Number(keyword[1]);
+  const leading = /^\s*#?\s*(\d{1,3})\s*[.)\]]\s+\S/.exec(title);
+  if (leading) return Number(leading[1]);
+  return null;
+}
+
+/**
+ * True when the titles clearly count DOWN the playlist (some channels ship
+ * the last lecture first: "Lec 70 … " at the top, "Lec 01 …" at the bottom),
+ * so the entries must be reversed into teaching order. Conservative: it needs
+ * a dense run of numbered titles whose local steps mostly descend — a playlist
+ * whose titles carry no numbers is left exactly as pasted.
+ */
+function looksDescending(entries: { title: string }[]): boolean {
+  const numbered: { index: number; n: number }[] = [];
+  entries.forEach((entry, index) => {
+    const n = lectureNumber(entry.title);
+    if (n !== null) numbered.push({ index, n });
+  });
+  if (numbered.length < 4 || numbered.length * 2 < entries.length) return false;
+
+  let down = 0;
+  let up = 0;
+  for (let k = 1; k < numbered.length; k += 1) {
+    const prev = numbered[k - 1];
+    const cur = numbered[k];
+    if (cur.index - prev.index > 3) continue; // too wide a gap to trust
+    if (prev.n > cur.n) down += 1;
+    else if (prev.n < cur.n) up += 1;
+  }
+  return down >= 3 && down > up;
 }
 
 /**
@@ -82,7 +121,7 @@ export async function loadPlaylist(playlistId: string): Promise<Playlist> {
     throw new PlaylistError("That playlist could not be read. Check the link and try again.");
   }
 
-  const entries = (Array.isArray(parsed.entries) ? parsed.entries : [])
+  let entries = (Array.isArray(parsed.entries) ? parsed.entries : [])
     .map((raw) => {
       const item = raw as Record<string, unknown>;
       const videoId = typeof item.id === "string" ? item.id.trim() : "";
@@ -98,6 +137,17 @@ export async function loadPlaylist(playlistId: string): Promise<Playlist> {
   if (entries.length === 0) {
     throw new PlaylistError("That playlist has no readable videos.");
   }
+
+  // Some playlists ship the last lecture first — title numbers counting down
+  // the list. Detect that from the titles and reverse into teaching order, so
+  // positions, caption fetches and chapters all follow the real sequence.
+  if (looksDescending(entries)) {
+    console.info(
+      `[playlist] ${playlistId}: titles count down — reversed ${entries.length} entries into teaching order`,
+    );
+    entries = [...entries].reverse();
+  }
+
   if (entries.length > MAX_PLAYLIST_VIDEOS) {
     throw new PlaylistError(
       `That playlist has ${entries.length} videos — one course can hold at most ${MAX_PLAYLIST_VIDEOS}. Paste a shorter playlist.`,

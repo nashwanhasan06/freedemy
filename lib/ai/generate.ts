@@ -1333,12 +1333,16 @@ export async function runCourseGeneration(params: {
   }
 }
 
-/** Caption requests back-to-back are what earns YouTube's 429 — pace every video. */
-const VIDEO_PACE_MS = 3_000;
-/** A throttled caption fetch is waited out in place: the error itself asks for minutes. */
-const RATE_LIMIT_WAIT_MS = 60_000;
+/** Caption requests back-to-back are what earns YouTube's 429 — pace every video.
+ * yt-dlp's wiki puts the guest-session limit at ~300 videos/hour and asks for
+ * a 5–10 s delay between downloads: base + jitter lands inside that band. */
+const VIDEO_PACE_MS = 5_000;
+const VIDEO_PACE_JITTER_MS = 5_000;
+/** A 429 is a soft block that lifts in minutes, so the in-place wait grows
+ * 2 → 5 → 15 min (+20% jitter) instead of re-firing while still blocked. */
+const RATE_LIMIT_BACKOFF_MS = [120_000, 300_000, 900_000] as const;
 /** In-place waits per video per run before leaving it queued for a later run. */
-const RATE_LIMIT_WAITS = 2;
+const RATE_LIMIT_WAITS = RATE_LIMIT_BACKOFF_MS.length;
 
 /**
  * Old builds appended chapter numbers in build order, so a resumed run could
@@ -1457,12 +1461,14 @@ async function runPlaylistGeneration(params: {
         const throttled = error instanceof TranscriptError && error.code === "rate-limited";
 
         if (throttled && rateLimitWaits < RATE_LIMIT_WAITS) {
+          const base = RATE_LIMIT_BACKOFF_MS[rateLimitWaits];
+          const waitMs = base + Math.floor(Math.random() * (base / 5));
           rateLimitWaits += 1;
-          const waitSeconds = (RATE_LIMIT_WAIT_MS * rateLimitWaits) / 1_000;
+          const waitSeconds = Math.round(waitMs / 1_000);
           await setStatus(admin, courseId, {
             stage: `${label}YouTube is rate-limiting captions — waiting ${waitSeconds}s`,
           });
-          await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_WAIT_MS * rateLimitWaits));
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
           continue;
         }
 
@@ -1489,8 +1495,11 @@ async function runPlaylistGeneration(params: {
       }
     }
 
-    // Caption requests back-to-back are what earns the 429 — pace every video.
-    await new Promise((resolve) => setTimeout(resolve, VIDEO_PACE_MS));
+    // Caption requests back-to-back are what earns the 429 — pace every video
+    // at the wiki's 5–10 s band (base + jitter).
+    await new Promise((resolve) =>
+      setTimeout(resolve, VIDEO_PACE_MS + Math.floor(Math.random() * VIDEO_PACE_JITTER_MS)),
+    );
   }
 
   if (doneCount === 0) {
