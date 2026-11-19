@@ -1,4 +1,4 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "@/lib/storage";
 
 import type { ExerciseError } from "@/lib/types";
 
@@ -50,8 +50,9 @@ export type ProjectLookup =
   | { status: "error" };
 
 /**
- * A project table that has not been created yet is a setup step, not a bug: the
- * schema block ships in supabase/schema.sql. Everything else is a real error.
+ * A table the current schema does not know about yet (an older database file)
+ * is a setup step, not a bug: schema.sqlite.sql is applied automatically at
+ * first open. Everything else is a real error.
  */
 export function isMissingProjectSetup(
   error: { code?: string; message?: string } | null | undefined,
@@ -86,10 +87,10 @@ function reviewFrom(row: ProjectSubmissionRow): ProjectReview {
 
 /** The cached brief for a course, if one was already generated. */
 export async function getProject(
-  supabase: SupabaseClient,
+  db: DbClient,
   courseId: string,
 ): Promise<CourseProject | null> {
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from("course_projects")
     .select("*")
     .eq("course_id", courseId)
@@ -101,13 +102,13 @@ export async function getProject(
 
 /** The brief plus the student's attempts, for the project page. */
 export async function getProjectState(
-  supabase: SupabaseClient,
+  db: DbClient,
   userId: string,
   courseId: string,
 ): Promise<ProjectLookup> {
   let project: CourseProject | null;
   try {
-    project = await getProject(supabase, courseId);
+    project = await getProject(db, courseId);
   } catch (error) {
     if (isMissingProjectSetup(error as { code?: string; message?: string })) {
       return { status: "setup" };
@@ -117,7 +118,7 @@ export async function getProjectState(
 
   if (!project) return { status: "empty" };
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from("project_submissions")
     .select("score,passed,summary,checks,errors,code,created_at")
     .eq("user_id", userId)
@@ -161,13 +162,13 @@ export async function getProjectState(
  * badges, so a missing table just means "no completions yet".
  */
 export async function listProjectCompletions(
-  supabase: SupabaseClient,
+  db: DbClient,
   userId: string,
   courseIds: string[],
 ): Promise<Set<string>> {
   if (courseIds.length === 0) return new Set();
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from("project_submissions")
     .select("course_id")
     .eq("user_id", userId)
@@ -175,5 +176,5 @@ export async function listProjectCompletions(
     .in("course_id", courseIds);
 
   if (error) return new Set();
-  return new Set((data ?? []).map((row) => row.course_id as string));
+  return new Set((data ?? []).map((row: { course_id: string }) => row.course_id as string));
 }

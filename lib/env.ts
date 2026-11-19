@@ -1,29 +1,13 @@
 /**
  * Environment access in one place. Nothing here throws at import time so that
- * `next build` works before the operator has created a Supabase project.
+ * `next build` works before any keys exist. Storage and auth need no
+ * environment at all — the SQLite database and session secret are created
+ * automatically under `data/`. AI provider variables (`AI_*`, `NVIDIA_NIM_*`)
+ * live in `lib/ai/provider.ts`.
  */
 
-export const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
-export const SUPABASE_ANON_KEY =
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
-  "";
-export const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
-
-export const NIM_BASE_URL = (
-  process.env.NVIDIA_NIM_BASE_URL ?? "https://integrate.api.nvidia.com/v1"
-).replace(/\/+$/, "");
-export const NIM_API_KEY = process.env.NVIDIA_NIM_API_KEY ?? "";
-/**
- * NIM hosts a large catalogue but only part of it is enabled per account; this
- * default is an NVIDIA model that is enabled on the free endpoints, honours
- * JSON mode, handles a full lecture transcript and writes usable mermaid.
- */
-export const NIM_MODEL_DEFAULT = "nvidia/nemotron-3-ultra-550b-a55b";
-export const NIM_MODEL = process.env.NVIDIA_NIM_MODEL ?? NIM_MODEL_DEFAULT;
-
-/** Hard ceiling for the NIM account. The scheduler never exceeds it. */
-export const AI_RPM_LIMIT = Number(process.env.AI_RPM_LIMIT ?? 40) || 40;
+import { isAiConfigured } from "@/lib/ai/provider";
+import { hasAnyAiKey, hasAnyCustomEndpoint } from "@/lib/ai/user-provider";
 
 /** In-flight cap for interactive calls (tutor, grading). */
 export const AI_CONCURRENCY = Number(process.env.AI_CONCURRENCY ?? 4) || 4;
@@ -43,61 +27,14 @@ export const AI_BACKGROUND_CONCURRENCY =
 export const AI_INTERACTIVE_RESERVE =
   Number(process.env.AI_INTERACTIVE_RESERVE ?? 8) || 8;
 
-/** Resend API key for transactional email (password reset links). */
-export const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
-
 /**
- * From address for outgoing email. Resend only accepts senders verified in
- * its dashboard; in test mode that is "onboarding@resend.dev".
+ * What still blocks a working install. Async because an account key saved in
+ * Settings satisfies the AI-key requirement exactly like .env.local does.
  */
-export const EMAIL_FROM =
-  process.env.EMAIL_FROM ?? "Freedemy <onboarding@resend.dev>";
-
-export function isSupabaseConfigured(): boolean {
-  return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
-}
-
-export function isServiceRoleConfigured(): boolean {
-  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
-}
-
-export function isNimConfigured(): boolean {
-  return Boolean(NIM_API_KEY);
-}
-
-export function isEmailConfigured(): boolean {
-  return Boolean(RESEND_API_KEY);
-}
-
-const SETUP_HINT =
-  "Supabase is not configured. Copy .env.example to .env.local and set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY, then run supabase/schema.sql in the Supabase SQL editor.";
-
-export function assertSupabaseConfigured(): void {
-  if (!isSupabaseConfigured()) {
-    throw new Error(SETUP_HINT);
-  }
-}
-
-export function assertServiceRoleConfigured(): void {
-  if (!isServiceRoleConfigured()) {
-    throw new Error(
-      "SUPABASE_SERVICE_ROLE_KEY is missing. The course generator writes course content on the server, so it needs the service role key from Supabase → Project Settings → API.",
-    );
-  }
-}
-
-export function assertNimConfigured(): void {
-  if (!isNimConfigured()) {
-    throw new Error(
-      "NVIDIA_NIM_API_KEY is missing. Add it to .env.local so the tutor, the course generator and the code grader can call the NIM endpoint.",
-    );
-  }
-}
-
-export function setupProblems(): string[] {
+export async function setupProblems(): Promise<string[]> {
   const problems: string[] = [];
-  if (!isSupabaseConfigured()) problems.push("Supabase URL / anon key");
-  if (!isServiceRoleConfigured()) problems.push("Supabase service role key");
-  if (!isNimConfigured()) problems.push("NVIDIA NIM API key");
+  if (!isAiConfigured() && !(await hasAnyAiKey()) && !(await hasAnyCustomEndpoint())) {
+    problems.push("AI API key — paste one in Settings (gear icon) or set AI_API_KEY in .env.local");
+  }
   return problems;
 }

@@ -1,12 +1,37 @@
 "use server";
 
-import { headers } from "next/headers";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import type { AuthState } from "@/lib/actions/types";
-import { passwordResetEmail, sendEmail } from "@/lib/email";
-import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+  hashSecret,
+  normalizeAnswer,
+  signSession,
+  verifySecret,
+} from "@/lib/auth/crypto";
+import { adminDb } from "@/lib/storage";
+import { ensureStarterCourses } from "@/lib/db/seed";
+
+/**
+ * Local accounts only: display name + password + a personal security
+ * question. There is no email anywhere in this flow — recovery happens by
+ * answering the question, and sessions are HMAC cookies signed by this app.
+ */
+
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_MS = 30_000;
+
+type UserRow = {
+  id: string;
+  display_name: string;
+  password_hash: string;
+  security_answer_hash: string;
+  failed_attempts: number;
+  locked_until: number | null;
+};
 
 function safeNext(value: FormDataEntryValue | null): string {
   const next = typeof value === "string" ? value : "";
@@ -19,181 +44,164 @@ function field(formData: FormData, name: string): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-async function origin(): Promise<string> {
-  const store = await headers();
-  const explicit = store.get("origin");
-  if (explicit) return explicit;
+async function startSession(userId: string): Promise<void> {
+  const store = await cookies();
+  store.set(SESSION_COOKIE, signSession(userId), {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: Math.floor(SESSION_TTL_MS / 1000),
+    // No `secure`: the app runs on http://localhost.
+  });
+}
 
-  const host = store.get("x-forwarded-host") ?? store.get("host") ?? "localhost:3000";
-  const protocol = store.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  return `${protocol}://${host}`;
+/** Lookup is case-insensitive — the column is `collate nocase`. */
+async function findUser(name: string): Promise<UserRow | null> {
+  const { data } = await adminDb()
+    .from("users")
+    .select("*")
+    .eq("display_name", name)
+    .maybeSingle();
+  return (data as UserRow | null) ?? null;
+}
+
+function lockMessage(user: UserRow): string {
+  const wait = Math.max(1, Math.ceil(((user.locked_until ?? 0) - Date.now()) / 1000));
+  return `Too many failed attempts. Try again in ${wait} second${wait === 1 ? "" : "s"}.`;
+}
+
+/** Counts a wrong password/answer; 5 in a row locks the account for 30s. */
+async function registerFailure(user: UserRow, message: string): Promise<string> {
+  const failed = user.failed_attempts + 1;
+  if (failed >= MAX_FAILED_ATTEMPTS) {
+    await adminDb()
+      .from("users")
+      .update({ failed_attempts: 0, locked_until: Date.now() + LOCKOUT_MS })
+      .eq("id", user.id);
+    return `Too many failed attempts. Try again in ${Math.round(LOCKOUT_MS / 1000)} seconds.`;
+  }
+  await adminDb()
+    .from("users")
+    .update({ failed_attempts: failed })
+    .eq("id", user.id);
+  return message;
 }
 
 export async function signInAction(_state: AuthState, formData: FormData): Promise<AuthState> {
-  const email = field(formData, "email");
+  const name = field(formData, "name");
   const password = field(formData, "password");
   const next = safeNext(formData.get("next"));
 
-  if (!email || !password) {
-    return { error: "Enter your email and password." };
+  if (!name || !password) {
+    return { error: "Pick an account and enter its password." };
   }
 
-  const supabase = await createSupabaseServerClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const user = await findUser(name);
+  if (!user) return { error: "That name and password don't match an account." };
+  if (user.locked_until && user.locked_until > Date.now()) return { error: lockMessage(user) };
 
-  if (error) {
-    return {
-      error:
-        error.message === "Invalid login credentials"
-          ? "That email and password don't match an account."
-          : error.message,
-    };
+  if (!verifySecret(password, user.password_hash)) {
+    return { error: await registerFailure(user, "That name and password don't match an account.") };
   }
 
+  if (user.failed_attempts !== 0 || user.locked_until !== null) {
+    await adminDb()
+      .from("users")
+      .update({ failed_attempts: 0, locked_until: null })
+      .eq("id", user.id);
+  }
+
+  await startSession(user.id);
   redirect(next);
 }
 
 export async function signUpAction(_state: AuthState, formData: FormData): Promise<AuthState> {
   const name = field(formData, "name");
-  const email = field(formData, "email");
   const password = field(formData, "password");
+  const confirm = field(formData, "confirm");
+  const question = field(formData, "question");
+  const answer = field(formData, "answer");
   const next = safeNext(formData.get("next"));
 
   if (!name) return { error: "Tell us your name." };
-  if (!email || !email.includes("@")) return { error: "Enter a valid email address." };
+  if (name.length > 60) return { error: "Use a shorter display name (60 characters max)." };
   if (password.length < 8) return { error: "Use at least 8 characters for your password." };
+  if (password !== confirm) return { error: "Both passwords don't match." };
+  if (!question) return { error: "Add a security question — it's how you recover your password." };
+  if (!answer) return { error: "Add the answer to your security question." };
 
-  const supabase = await createSupabaseServerClient();
-  const appOrigin = await origin();
-
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: { full_name: name },
-      emailRedirectTo: `${appOrigin}/auth/callback?next=${encodeURIComponent(next)}`,
-    },
-  });
-
-  if (error) {
+  const existing = await findUser(name);
+  if (existing) {
     return {
-      error: /already registered|already exists/i.test(error.message)
-        ? "An account with that email already exists. Sign in instead."
-        : error.message,
+      error: `An account named “${existing.display_name}” already exists. Sign in instead.`,
     };
   }
 
-  if (!data.session) {
-    return {
-      message: "Check your inbox — confirm your email and then sign in to start learning.",
-    };
+  const created = await adminDb()
+    .from("users")
+    .insert({
+      display_name: name,
+      password_hash: hashSecret(password),
+      security_question: question,
+      security_answer_hash: hashSecret(normalizeAnswer(answer)),
+    })
+    .select("id")
+    .single();
+
+  if (created.error) {
+    // 23505: two signups raced on the same (case-insensitive) name.
+    if (created.error.code === "23505") {
+      return { error: "An account with that name already exists. Sign in instead." };
+    }
+    return { error: created.error.message };
   }
 
+  // Starter courses are seeded here, once — never on the dashboard, so courses
+  // the user deletes stay deleted. Local SQLite makes this near-instant; a
+  // seed failure must not lose the freshly created account.
+  try {
+    await ensureStarterCourses(adminDb(), created.data.id);
+  } catch (error) {
+    console.error("[seed] starter courses failed", error);
+  }
+
+  await startSession(created.data.id);
   redirect(next);
 }
 
 export async function signOutAction(): Promise<void> {
-  const supabase = await createSupabaseServerClient();
-  await supabase.auth.signOut();
+  const store = await cookies();
+  store.delete(SESSION_COOKIE);
   redirect("/");
 }
 
-const RESET_WINDOW_MS = 15 * 60_000;
-const MAX_RESET_REQUESTS = 3;
-const resetRequests = new Map<string, number[]>();
-
-/** Process-local throttle, same trade-off as the AI limiter: one Node instance. */
-function resetThrottled(email: string): boolean {
-  const now = Date.now();
-  const recent = (resetRequests.get(email) ?? []).filter((at) => now - at < RESET_WINDOW_MS);
-  if (recent.length >= MAX_RESET_REQUESTS) return true;
-  recent.push(now);
-  resetRequests.set(email, recent);
-  return false;
-}
-
-const RESET_LINK_MESSAGE =
-  "If that address has an account, a reset link is on its way. It expires in 1 hour.";
-
-/**
- * Mints a recovery token with the service-role client and sends the link
- * through Resend, so the flow does not depend on Supabase's SMTP settings.
- * The reply is identical whether or not the address exists.
- */
-export async function requestPasswordResetAction(
-  _state: AuthState,
-  formData: FormData,
-): Promise<AuthState> {
-  const email = field(formData, "email").toLowerCase();
-  if (!email || !email.includes("@")) {
-    return { error: "Enter a valid email address." };
-  }
-
-  if (resetThrottled(email)) {
-    return { error: "Too many reset requests for this email. Wait 15 minutes and try again." };
-  }
-
-  try {
-    const admin = createSupabaseAdminClient();
-    const { data, error } = await admin.auth.admin.generateLink({ type: "recovery", email });
-    const token = data?.properties?.hashed_token;
-
-    if (!error && token) {
-      const url = `${await origin()}/reset-password?token=${encodeURIComponent(token)}`;
-      const sent = await sendEmail({ to: email, ...passwordResetEmail(url) });
-
-      if (sent.ok) return { message: RESET_LINK_MESSAGE };
-
-      console.warn(`[email] password-reset send failed (${sent.error})`);
-      // A dead send must not dead-end the flow: in development the link goes
-      // to the server log instead. Never logged in production.
-      if (process.env.NODE_ENV !== "production") {
-        console.warn(`[email] reset link for ${email}: ${url}`);
-      }
-      return { message: RESET_LINK_MESSAGE };
-    }
-
-    console.warn(`[email] recovery link generation failed: ${error?.message ?? "unknown"}`);
-  } catch (error) {
-    console.warn(
-      `[email] password reset unavailable: ${error instanceof Error ? error.message : error}`,
-    );
-  }
-
-  return { message: RESET_LINK_MESSAGE };
-}
-
-/**
- * Exchanges the emailed token for a session, then lets that session set the
- * new password. Both steps must succeed; an expired or reused token fails at
- * verifyOtp before anything changes.
- */
-export async function resetPasswordAction(
-  _state: AuthState,
-  formData: FormData,
-): Promise<AuthState> {
-  const token = field(formData, "token");
+export async function recoverAction(_state: AuthState, formData: FormData): Promise<AuthState> {
+  const name = field(formData, "name");
+  const answer = field(formData, "answer");
   const password = field(formData, "password");
   const confirm = field(formData, "confirm");
 
-  if (!token) return { error: "That reset link is incomplete. Request a new one." };
+  if (!name) return { error: "Pick your account again." };
   if (password.length < 8) return { error: "Use at least 8 characters for your password." };
   if (password !== confirm) return { error: "Both passwords don't match." };
 
-  const supabase = await createSupabaseServerClient();
+  const user = await findUser(name);
+  if (!user) return { error: "That name doesn't match an account." };
+  if (user.locked_until && user.locked_until > Date.now()) return { error: lockMessage(user) };
 
-  const { error: verifyError } = await supabase.auth.verifyOtp({
-    type: "recovery",
-    token_hash: token,
-  });
-  if (verifyError) {
-    return { error: "That reset link has expired or was already used. Request a new one." };
+  if (!verifySecret(normalizeAnswer(answer), user.security_answer_hash)) {
+    return { error: await registerFailure(user, "That answer doesn't match your security question.") };
   }
 
-  const { error: updateError } = await supabase.auth.updateUser({ password });
-  if (updateError) {
-    return { error: updateError.message };
-  }
+  await adminDb()
+    .from("users")
+    .update({
+      password_hash: hashSecret(password),
+      failed_attempts: 0,
+      locked_until: null,
+    })
+    .eq("id", user.id);
 
+  await startSession(user.id);
   redirect("/dashboard");
 }

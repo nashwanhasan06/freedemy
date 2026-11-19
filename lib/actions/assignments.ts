@@ -4,7 +4,7 @@ import type { SubmitAnswers, SubmitState } from "@/lib/actions/types";
 import { nimJson } from "@/lib/ai/nim";
 import { gradeSystem, gradeUser } from "@/lib/ai/prompts";
 import { requireUser } from "@/lib/auth";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 import type { ExerciseError, ExerciseFeedback } from "@/lib/types";
 
 type ExerciseRow = {
@@ -99,9 +99,9 @@ export async function submitAssignmentAction(input: {
 
     if (!lessonId) return { ok: false, error: "Missing lesson." };
 
-    const supabase = await createSupabaseServerClient();
+    const db = await userDb();
 
-    const { data: lessonData, error: lessonError } = await supabase
+    const { data: lessonData, error: lessonError } = await db
       .from("lessons")
       .select("id,course_id,title,summary,start_seconds,end_seconds")
       .eq("id", lessonId)
@@ -118,8 +118,8 @@ export async function submitAssignmentAction(input: {
     };
 
     const [{ data: exerciseData }, { data: courseData }] = await Promise.all([
-      supabase.from("exercises").select("*").eq("lesson_id", lessonId).order("position"),
-      supabase.from("courses").select("id,language").eq("id", lesson.course_id).maybeSingle(),
+      db.from("exercises").select("*").eq("lesson_id", lessonId).order("position"),
+      db.from("courses").select("id,language").eq("id", lesson.course_id).maybeSingle(),
     ]);
 
     const exercises = (exerciseData ?? []) as ExerciseRow[];
@@ -242,7 +242,7 @@ export async function submitAssignmentAction(input: {
     const score = totalPoints === 0 ? 0 : Math.round((earned / totalPoints) * 100);
     const correctCount = feedback.filter((item) => item.correct).length;
 
-    const { error: submissionError } = await supabase.from("submissions").insert(
+    const { error: submissionError } = await db.from("submissions").insert(
       feedback.map((item) => {
         const exercise = exercises.find((row) => row.id === item.exerciseId);
         const answer = answers[item.exerciseId] ?? {};
@@ -265,7 +265,7 @@ export async function submitAssignmentAction(input: {
       console.error("[assignments] could not save submissions", submissionError.message);
     }
 
-    const { data: previous } = await supabase
+    const { data: previous } = await db
       .from("lesson_progress")
       .select("score,attempts")
       .eq("user_id", user.id)
@@ -274,7 +274,7 @@ export async function submitAssignmentAction(input: {
 
     const bestScore = Math.max(score, (previous?.score as number | undefined) ?? 0);
 
-    const { error: progressError } = await supabase.from("lesson_progress").upsert(
+    const { error: progressError } = await db.from("lesson_progress").upsert(
       {
         user_id: user.id,
         course_id: lesson.course_id,

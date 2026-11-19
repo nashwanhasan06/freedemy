@@ -10,7 +10,7 @@ import { requireUser } from "@/lib/auth";
 import { courseLessons } from "@/lib/course";
 import { getCourseBundle } from "@/lib/db/courses";
 import { getProjectState } from "@/lib/db/projects";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 
 export const metadata: Metadata = { title: "Final project" };
 export const instant = false;
@@ -19,9 +19,9 @@ export default async function ProjectPage({ params }: PageProps<"/course/[slug]/
   await connection();
   const { slug } = await params;
   const user = await requireUser(`/course/${slug}/project`);
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const bundle = await getCourseBundle(supabase, user.id, slug);
+  const bundle = await getCourseBundle(db, user.id, slug);
   if (!bundle || !bundle.course.id) notFound();
 
   // A capstone is only meaningful once there is material to build it from.
@@ -29,7 +29,7 @@ export default async function ProjectPage({ params }: PageProps<"/course/[slug]/
     redirect(`/generating?course=${bundle.course.id}`);
   }
 
-  const lookup = await getProjectState(supabase, user.id, bundle.course.id);
+  const lookup = await getProjectState(db, user.id, bundle.course.id);
 
   return (
     <div className="flex min-h-screen flex-col">

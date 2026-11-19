@@ -5,7 +5,7 @@ import { nimJson } from "@/lib/ai/nim";
 import { tutorSystem, type TutorMaterial } from "@/lib/ai/prompts";
 import { loadTutorThread } from "@/lib/ai/tutor-session";
 import { requireUser } from "@/lib/auth";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 import type { KeyTerm, NoteBlock } from "@/lib/types";
 
 type LessonRow = {
@@ -64,9 +64,9 @@ export async function askTutorAction(input: {
       return { ok: false, error: "That question is too long — keep it under 2000 characters." };
     }
 
-    const supabase = await createSupabaseServerClient();
+    const db = await userDb();
 
-    const { data: lessonData, error: lessonError } = await supabase
+    const { data: lessonData, error: lessonError } = await db
       .from("lessons")
       .select("id,course_id,module_id,position,title,summary,start_seconds,end_seconds,key_terms,notes")
       .eq("id", lessonId)
@@ -83,20 +83,20 @@ export async function askTutorAction(input: {
       { data: moduleData },
       thread,
     ] = await Promise.all([
-      supabase.from("courses").select("id,title").eq("id", lesson.course_id).maybeSingle(),
-      supabase
+      db.from("courses").select("id,title").eq("id", lesson.course_id).maybeSingle(),
+      db
         .from("exercises")
         .select("kind,prompt,language")
         .eq("lesson_id", lessonId)
         .order("position"),
-      supabase
+      db
         .from("modules")
         .select("id,title,summary")
         .eq("id", lesson.module_id)
         .maybeSingle(),
       // The summary plus the turns still inside the verbatim window; folds
       // older turns itself when the thread has outgrown the budget.
-      loadTutorThread(supabase, {
+      loadTutorThread(db, {
         userId: user.id,
         lessonId,
         courseId: lesson.course_id,
@@ -106,7 +106,7 @@ export async function askTutorAction(input: {
 
     // The tutor teaches a section inside a module, so it needs to know what
     // comes before and after it to point the student at the right place.
-    const { data: siblingData } = await supabase
+    const { data: siblingData } = await db
       .from("lessons")
       .select("title,position")
       .eq("module_id", lesson.module_id)
@@ -140,7 +140,7 @@ export async function askTutorAction(input: {
       neighbours,
     };
 
-    const { error: insertError } = await supabase.from("tutor_messages").insert({
+    const { error: insertError } = await db.from("tutor_messages").insert({
       user_id: user.id,
       course_id: lesson.course_id,
       lesson_id: lessonId,
@@ -182,7 +182,7 @@ export async function askTutorAction(input: {
       validate: validateReply(lesson.start_seconds, lesson.end_seconds),
     });
 
-    const { data: saved, error: saveError } = await supabase
+    const { data: saved, error: saveError } = await db
       .from("tutor_messages")
       .insert({
         user_id: user.id,

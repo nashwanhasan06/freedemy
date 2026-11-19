@@ -13,11 +13,11 @@ import {
 import { requireUser } from "@/lib/auth";
 import { getProject, isMissingProjectSetup, type CourseProject } from "@/lib/db/projects";
 import type { LessonRow, ModuleRow, ProjectRow } from "@/lib/db/types";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 import type { ExerciseError } from "@/lib/types";
 
 const SETUP_HINT =
-  "The final-project tables are missing. Run the course_projects block in supabase/schema.sql in the Supabase SQL editor, then reload this page.";
+  "The database is missing some tables. Stop Freedemy and restart it so the schema is re-applied, then reload this page.";
 
 const MAX_CODE_LENGTH = 20_000;
 const MAX_ATTEMPTS = 25;
@@ -183,9 +183,9 @@ export async function createProjectAction(courseId: string): Promise<ProjectCrea
       return { ok: false, error: "Missing course." };
     }
 
-    const supabase = await createSupabaseServerClient();
+    const db = await userDb();
 
-    const { data: courseData, error: courseError } = await supabase
+    const { data: courseData, error: courseError } = await db
       .from("courses")
       .select("id,slug,title,language,level,status")
       .eq("id", courseId)
@@ -203,7 +203,7 @@ export async function createProjectAction(courseId: string): Promise<ProjectCrea
     };
 
     try {
-      const existing = await getProject(supabase, course.id);
+      const existing = await getProject(db, course.id);
       if (existing) return { ok: true, project: existing };
     } catch (error) {
       if (isMissingProjectSetup(error as { code?: string; message?: string })) {
@@ -213,8 +213,8 @@ export async function createProjectAction(courseId: string): Promise<ProjectCrea
     }
 
     const [{ data: moduleData }, { data: lessonData }] = await Promise.all([
-      supabase.from("modules").select("*").eq("course_id", course.id).order("position"),
-      supabase.from("lessons").select("*").eq("course_id", course.id).order("position"),
+      db.from("modules").select("*").eq("course_id", course.id).order("position"),
+      db.from("lessons").select("*").eq("course_id", course.id).order("position"),
     ]);
 
     const modules = (moduleData ?? []) as ModuleRow[];
@@ -264,7 +264,7 @@ export async function createProjectAction(courseId: string): Promise<ProjectCrea
       });
     }
 
-    const { data: created, error: insertError } = await supabase
+    const { data: created, error: insertError } = await db
       .from("course_projects")
       .insert({
         course_id: course.id,
@@ -281,7 +281,7 @@ export async function createProjectAction(courseId: string): Promise<ProjectCrea
       if (isMissingProjectSetup(insertError)) return { ok: false, error: SETUP_HINT };
       // Another tab won the race: use whatever it stored.
       if (insertError.code === "23505") {
-        const existing = await getProject(supabase, course.id);
+        const existing = await getProject(db, course.id);
         if (existing) return { ok: true, project: existing };
       }
       return { ok: false, error: insertError.message };
@@ -333,9 +333,9 @@ export async function submitProjectAction(input: {
       };
     }
 
-    const supabase = await createSupabaseServerClient();
+    const db = await userDb();
 
-    const { data: courseData, error: courseError } = await supabase
+    const { data: courseData, error: courseError } = await db
       .from("courses")
       .select("id,slug,title,language")
       .eq("id", courseId)
@@ -348,7 +348,7 @@ export async function submitProjectAction(input: {
 
     let project: CourseProject | null;
     try {
-      project = await getProject(supabase, course.id);
+      project = await getProject(db, course.id);
     } catch (error) {
       if (isMissingProjectSetup(error as { code?: string; message?: string })) {
         return { ok: false, error: SETUP_HINT };
@@ -360,7 +360,7 @@ export async function submitProjectAction(input: {
       return { ok: false, error: "Build the project brief first, then submit your code." };
     }
 
-    const { count } = await supabase
+    const { count } = await db
       .from("project_submissions")
       .select("id", { count: "exact", head: true })
       .eq("user_id", user.id)
@@ -394,7 +394,7 @@ export async function submitProjectAction(input: {
     const score = clamp(review.score, 0, 100);
     const passed = review.passed && score >= PASS_SCORE;
 
-    const { error: insertError } = await supabase.from("project_submissions").insert({
+    const { error: insertError } = await db.from("project_submissions").insert({
       user_id: user.id,
       course_id: course.id,
       project_id: project.id,

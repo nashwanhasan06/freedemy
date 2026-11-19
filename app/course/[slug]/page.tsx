@@ -7,7 +7,7 @@ import { getCurrentUser, requireUser } from "@/lib/auth";
 import { courseLessons } from "@/lib/course";
 import { getCourseBundle } from "@/lib/db/courses";
 import { getProjectState } from "@/lib/db/projects";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 
 /**
  * The course page resolves its slug from the session's database rows, so it is
@@ -23,8 +23,8 @@ export async function generateMetadata({
   const user = await getCurrentUser();
   if (!user) return { title: "Course" };
 
-  const supabase = await createSupabaseServerClient();
-  const bundle = await getCourseBundle(supabase, user.id, slug);
+  const db = await userDb();
+  const bundle = await getCourseBundle(db, user.id, slug);
 
   return { title: bundle?.course.title ?? "Course not found" };
 }
@@ -33,9 +33,9 @@ export default async function CoursePage({ params }: PageProps<"/course/[slug]">
   await connection();
   const { slug } = await params;
   const user = await requireUser(`/course/${slug}`);
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const bundle = await getCourseBundle(supabase, user.id, slug);
+  const bundle = await getCourseBundle(db, user.id, slug);
 
   if (!bundle) notFound();
 
@@ -47,7 +47,7 @@ export default async function CoursePage({ params }: PageProps<"/course/[slug]">
   }
 
   const lookup = bundle.course.id
-    ? await getProjectState(supabase, user.id, bundle.course.id)
+    ? await getProjectState(db, user.id, bundle.course.id)
     : ({ status: "empty" } as const);
 
   return (

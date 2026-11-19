@@ -9,7 +9,7 @@ import { SiteHeader } from "@/components/site-header";
 import { getCurrentUser } from "@/lib/auth";
 import { listCourseSummaries, type CourseSummary } from "@/lib/db/courses";
 import { DEMO_COURSES } from "@/lib/demo-data";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 
 /** Reads the session cookie to gate the generate form, so no prerender. */
 export const instant = false;
@@ -24,8 +24,8 @@ export default async function HomePage({ searchParams }: PageProps<"/">) {
   let userCourses: CourseSummary[] = [];
   if (user) {
     try {
-      const supabase = await createSupabaseServerClient();
-      userCourses = await listCourseSummaries(supabase, user.id);
+      const db = await userDb();
+      userCourses = await listCourseSummaries(db, user.id);
     } catch (e) {
       console.error("[home] failed to list user courses", e);
     }

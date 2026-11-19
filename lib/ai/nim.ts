@@ -1,8 +1,9 @@
 import "server-only";
 
-import { NIM_API_KEY, NIM_BASE_URL, NIM_MODEL, assertNimConfigured, isServiceRoleConfigured, isSupabaseConfigured } from "@/lib/env";
-import { aiLimiter, type Priority } from "@/lib/ai/limiter";
-import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { aiLimiterFor, type Priority } from "@/lib/ai/limiter";
+import { type ActiveProvider } from "@/lib/ai/provider";
+import { resolveProviderFor } from "@/lib/ai/user-provider";
+import { adminDb } from "@/lib/storage";
 
 export type NimMessage = {
   role: "system" | "user" | "assistant";
@@ -53,7 +54,9 @@ const COOLDOWN_429_MS = [30_000, 60_000, 120_000, 180_000];
  * The NVIDIA Nemotron models answer through a hidden reasoning pass first. That
  * pass is billed against max_tokens, so a 1 200-token map call came back with
  * empty content and the whole course build failed. Thinking is turned off, and
- * switched off for the process if a model rejects the field.
+ * switched off for the process if a model rejects the field. The flag is only
+ * ever sent to NIM (`provider.thinkingFlag`) — other vendors reject
+ * `chat_template_kwargs` with a 400.
  */
 let sendThinkingFlag = true;
 
@@ -65,18 +68,18 @@ function retryAfterMs(response: Response): number | null {
   return null;
 }
 
-function recordUsage(meta: NimMeta, usage: CallResult["usage"]): void {
-  if (!usage || !isSupabaseConfigured() || !isServiceRoleConfigured()) return;
+function recordUsage(meta: NimMeta, usage: CallResult["usage"], model: string): void {
+  if (!usage) return;
 
   try {
-    const admin = createSupabaseAdminClient();
+    const admin = adminDb();
     void admin
       .from("ai_usage")
       .insert({
         user_id: meta.userId ?? null,
         course_id: meta.courseId ?? null,
         kind: meta.kind,
-        model: NIM_MODEL,
+        model,
         prompt_tokens: usage.prompt_tokens ?? null,
         completion_tokens: usage.completion_tokens ?? null,
       })
@@ -89,13 +92,176 @@ function recordUsage(meta: NimMeta, usage: CallResult["usage"]): void {
   }
 }
 
+type WireOptions = {
+  jsonMode: boolean;
+  maxTokens: number;
+  temperature: number;
+  thinkingFlag: boolean;
+};
+
+async function httpError(provider: ActiveProvider, response: Response): Promise<AiError> {
+  const detail = await response.text().catch(() => "");
+  const authFailed = response.status === 401 || response.status === 403;
+  return new AiError(
+    `${provider.label} returned ${response.status}: ${detail.slice(0, 400) || response.statusText}` +
+      (authFailed
+        ? ` — the ${provider.label} API key was rejected; check your key in .env.local.`
+        : ""),
+    response.status,
+    retryAfterMs(response) ?? undefined,
+  );
+}
+
+/**
+ * OpenAI wire: NIM, OpenAI, DeepSeek and Gemini (through its OpenAI-compatible
+ * endpoint) all speak `/chat/completions`.
+ */
+async function postOpenAI(
+  provider: ActiveProvider,
+  messages: NimMessage[],
+  opts: WireOptions,
+): Promise<CallResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${provider.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${provider.apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        model: provider.model,
+        messages,
+        temperature: opts.temperature,
+        max_tokens: opts.maxTokens,
+        stream: false,
+        ...(opts.thinkingFlag ? { chat_template_kwargs: { thinking: false } } : {}),
+        ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
+      }),
+      // Large module generations routinely pass 180s on this model.
+      signal: AbortSignal.timeout(300_000),
+    });
+  } catch (error) {
+    throw new AiError(error instanceof Error ? error.message : String(error));
+  }
+
+  if (!response.ok) throw await httpError(provider, response);
+
+  const payload = (await response.json()) as {
+    choices?: { message?: { content?: string } }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  const content = payload.choices?.[0]?.message?.content?.trim();
+  if (!content) throw new AiError("The model returned an empty response.");
+  return { content, usage: payload.usage };
+}
+
+/**
+ * Anthropic's native `/v1/messages`: `system` moves to a top-level field, auth
+ * is `x-api-key`, and the reply arrives as content blocks instead of a single
+ * string. Usage is remapped to the OpenAI token names the rest of the code
+ * uses. There is no `response_format` here — JSON is asked for in prose and
+ * cleaned up by `parseJsonLoose` plus the repair round.
+ */
+async function postAnthropic(
+  provider: ActiveProvider,
+  messages: NimMessage[],
+  opts: WireOptions,
+): Promise<CallResult> {
+  const system = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n");
+  const dialogue = messages.filter((message) => message.role !== "system");
+
+  let response: Response;
+  try {
+    response = await fetch(`${provider.baseUrl}/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": provider.apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        model: provider.model,
+        max_tokens: opts.maxTokens,
+        temperature: opts.temperature,
+        ...(system ? { system } : {}),
+        messages: dialogue.map((message) => ({ role: message.role, content: message.content })),
+      }),
+      // Same generous ceiling as the OpenAI wire: long generations are normal.
+      signal: AbortSignal.timeout(300_000),
+    });
+  } catch (error) {
+    throw new AiError(error instanceof Error ? error.message : String(error));
+  }
+
+  if (!response.ok) throw await httpError(provider, response);
+
+  const payload = (await response.json()) as {
+    content?: { type?: string; text?: string }[];
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
+  const content = (payload.content ?? [])
+    .filter((block) => block.type === "text")
+    .map((block) => block.text ?? "")
+    .join("")
+    .trim();
+  if (!content) throw new AiError("The model returned an empty response.");
+  return {
+    content,
+    usage: payload.usage
+      ? {
+          prompt_tokens: payload.usage.input_tokens,
+          completion_tokens: payload.usage.output_tokens,
+        }
+      : undefined,
+  };
+}
+
+/**
+ * The student-facing message when no key resolves. A signed-in user is pointed
+ * at the Settings popup (their key lives there); an anonymous / background
+ * call falls back to the environment hint.
+ */
+function missingKeyError(provider: ActiveProvider, userId?: string): AiError {
+  if (userId) {
+    return new AiError(
+      `No ${provider.label} API key is set for this account. Open Settings (the gear icon) and paste your API key — or set AI_API_KEY in .env.local as a shared fallback.`,
+    );
+  }
+  return new AiError(
+    provider.id === "nim"
+      ? "No AI API key is configured. Set NVIDIA_NIM_API_KEY (or AI_API_KEY with AI_PROVIDER=nim) in .env.local so the tutor, the course generator and the code grader can call the model."
+      : `No ${provider.label} API key is configured. Set AI_PROVIDER=${provider.id} and AI_API_KEY in .env.local so the tutor, the course generator and the code grader can call the model.`,
+  );
+}
+
 async function callNim(
   messages: NimMessage[],
   { json, maxTokens, temperature, priority = "interactive", meta }: CallOptions,
 ): Promise<CallResult> {
-  assertNimConfigured();
+  const provider = await resolveProviderFor(meta.userId);
+  // Custom ships no defaults of its own: a missing URL means Settings was
+  // never completed (or AI_PROVIDER=custom lacks AI_BASE_URL), and a missing
+  // key is legal — a local gateway like Ollama needs none.
+  if (!provider.baseUrl) {
+    throw new AiError(
+      meta.userId
+        ? "This account's Custom endpoint is missing. Open Settings (the gear icon) and paste an API endpoint URL."
+        : "AI_PROVIDER=custom needs AI_BASE_URL (and AI_MODEL) in .env.local — or set Custom in Settings.",
+    );
+  }
+  if (!provider.apiKey && provider.id !== "custom") {
+    throw missingKeyError(provider, meta.userId);
+  }
+  const limiter = aiLimiterFor(provider);
+  const isNim = provider.id === "nim";
 
-  let jsonMode = json;
+  let jsonMode = Boolean(json) && provider.jsonMode;
   let lastError: Error | null = null;
 
   // One limiter slot per real HTTP request: a call that retries four times
@@ -107,51 +273,19 @@ async function callNim(
     let retry = false;
 
     try {
-      return await aiLimiter.run(priority, async () => {
-        let response: Response;
-        try {
-          response = await fetch(`${NIM_BASE_URL}/chat/completions`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${NIM_API_KEY}`,
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-            body: JSON.stringify({
-              model: NIM_MODEL,
-              messages,
-              temperature: temperature ?? 0.2,
-              max_tokens: maxTokens ?? 2_048,
-              stream: false,
-              ...(sendThinkingFlag ? { chat_template_kwargs: { thinking: false } } : {}),
-              ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
-            }),
-            // Large module generations routinely pass 180s on this model.
-            signal: AbortSignal.timeout(300_000),
-          });
-        } catch (error) {
-          throw new AiError(error instanceof Error ? error.message : String(error));
-        }
-
-        if (!response.ok) {
-          const detail = await response.text().catch(() => "");
-          throw new AiError(
-            `NVIDIA NIM returned ${response.status}: ${detail.slice(0, 400) || response.statusText}`,
-            response.status,
-            retryAfterMs(response) ?? undefined,
-          );
-        }
-
-        const payload = (await response.json()) as {
-          choices?: { message?: { content?: string } }[];
-          usage?: { prompt_tokens?: number; completion_tokens?: number };
+      return await limiter.run(priority, async () => {
+        const opts: WireOptions = {
+          jsonMode,
+          maxTokens: maxTokens ?? 2_048,
+          temperature: temperature ?? 0.2,
+          thinkingFlag: provider.thinkingFlag && sendThinkingFlag,
         };
-
-        const content = payload.choices?.[0]?.message?.content?.trim();
-        if (!content) throw new AiError("The model returned an empty response.");
-
-        recordUsage(meta, payload.usage);
-        return { content, usage: payload.usage };
+        const result =
+          provider.wire === "anthropic"
+            ? await postAnthropic(provider, messages, opts)
+            : await postOpenAI(provider, messages, opts);
+        recordUsage(meta, result.usage, provider.model);
+        return result;
       });
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -163,27 +297,37 @@ async function callNim(
         // Transport failure or empty content: retry with the usual backoff.
         retry = attempt < 4;
         waitMs = Math.min(16_000, 1_500 * 2 ** (attempt + 1));
-      } else if (status === 400 && sendThinkingFlag && /chat_template_kwargs|thinking/i.test(message)) {
+      } else if (
+        status === 400 &&
+        provider.thinkingFlag &&
+        sendThinkingFlag &&
+        /chat_template_kwargs|thinking/i.test(message)
+      ) {
         // The model rejects the thinking flag; switch it off for the process.
         sendThinkingFlag = false;
         retry = true;
         waitMs = 1_500;
       } else if (status === 400 && jsonMode && /response_format/i.test(message) && attempt < 3) {
-        // Some NIM models reject response_format. Retry once without it rather
+        // Some models reject response_format. Retry once without it rather
         // than failing the whole course build.
         jsonMode = false;
         retry = true;
         waitMs = 1_500;
       } else if (status === 429 && attempt < 4) {
-        // A 429 is account-wide and NIM usually omits Retry-After. Hold every
-        // lane for the same time, shrink the limiter's ceiling, and wait long
-        // enough for the provider to actually cool down — seconds are not
-        // enough, which is why the old schedule failed on long builds.
-        waitMs = Math.max(serverDelay ?? 0, COOLDOWN_429_MS[attempt]);
-        aiLimiter.penalize(waitMs);
-        console.warn(
-          `[nim] provider rate limit (429): pausing all lanes ${Math.round(waitMs / 1000)}s before attempt ${attempt + 2} of 5`,
-        );
+        if (isNim) {
+          // NIM: a 429 is account-wide and NIM usually omits Retry-After. Hold
+          // every lane for the same time, shrink the limiter's ceiling, and
+          // wait long enough for the provider to actually cool down — seconds
+          // are not enough, which is why the old schedule failed on long builds.
+          waitMs = Math.max(serverDelay ?? 0, COOLDOWN_429_MS[attempt]);
+          limiter.penalize(waitMs);
+          console.warn(
+            `[ai] provider rate limit (429): pausing all lanes ${Math.round(waitMs / 1000)}s before attempt ${attempt + 2} of 5`,
+          );
+        } else {
+          // Everyone else: honour Retry-After when present, else the usual backoff.
+          waitMs = serverDelay ?? Math.min(16_000, 1_500 * 2 ** (attempt + 1));
+        }
         retry = true;
       } else if (RETRYABLE.has(status) && attempt < 4) {
         waitMs = serverDelay ?? Math.min(16_000, 1_500 * 2 ** (attempt + 1));

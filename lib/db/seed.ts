@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "@/lib/storage";
 
 import { countCourses } from "@/lib/db/courses";
 import { DEMO_COURSES } from "@/lib/demo-data";
@@ -21,25 +21,25 @@ function demoLanguage(slug: string): string {
  * renders await the same seed.
  */
 export async function ensureStarterCourses(
-  supabase: SupabaseClient,
+  db: DbClient,
   userId: string,
 ): Promise<void> {
   const running = inFlight.get(userId);
   if (running) return running;
 
-  const job = seedStarterCourses(supabase, userId).finally(() => {
+  const job = seedStarterCourses(db, userId).finally(() => {
     inFlight.delete(userId);
   });
   inFlight.set(userId, job);
   return job;
 }
 
-async function seedStarterCourses(supabase: SupabaseClient, userId: string): Promise<void> {
-  const existing = await countCourses(supabase, userId);
+async function seedStarterCourses(db: DbClient, userId: string): Promise<void> {
+  const existing = await countCourses(db, userId);
   if (existing > 0) return;
 
   for (const demo of DEMO_COURSES) {
-    const { data: courseRow, error: courseError } = await supabase
+    const { data: courseRow, error: courseError } = await db
       .from("courses")
       .insert({
         user_id: userId,
@@ -71,7 +71,7 @@ async function seedStarterCourses(supabase: SupabaseClient, userId: string): Pro
     let lessonPosition = 0;
 
     for (const [moduleIndex, chapter] of demo.chapters.entries()) {
-      const { data: moduleRow, error: moduleError } = await supabase
+      const { data: moduleRow, error: moduleError } = await db
         .from("modules")
         .insert({
           course_id: courseId,
@@ -90,7 +90,7 @@ async function seedStarterCourses(supabase: SupabaseClient, userId: string): Pro
       }
 
       for (const lesson of chapter.lessons) {
-        const { data: lessonRow, error: lessonError } = await supabase
+        const { data: lessonRow, error: lessonError } = await db
           .from("lessons")
           .insert({
             course_id: courseId,
@@ -156,7 +156,7 @@ async function seedStarterCourses(supabase: SupabaseClient, userId: string): Pro
         }
 
         if (rows.length > 0) {
-          const { error: exerciseError } = await supabase.from("exercises").insert(rows);
+          const { error: exerciseError } = await db.from("exercises").insert(rows);
           if (exerciseError) {
             console.error("[seed] could not create exercises", exerciseError.message);
           }

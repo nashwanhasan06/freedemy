@@ -13,9 +13,9 @@ import { nimJson } from "@/lib/ai/nim";
 import { chapterQuizSystem, chapterQuizUser, gradeSystem, gradeUser } from "@/lib/ai/prompts";
 import { getCourseBundle } from "@/lib/db/courses";
 import { computeLocks } from "@/lib/locks";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 import { noteBody } from "@/lib/types";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "@/lib/storage";
 
 /** Questions per chapter exam. */
 const QUIZ_SIZE = 5;
@@ -150,7 +150,7 @@ function publicQuestions(questions: StoredQuestion[]): ChapterQuizQuestion[] {
 }
 
 type ExamContext = {
-  supabase: SupabaseClient;
+  db: DbClient;
   courseId: string;
   courseTitle: string;
   language: string;
@@ -169,9 +169,9 @@ async function loadExamContext(
   userId: string,
   moduleId: string,
 ): Promise<{ ok: true; context: ExamContext } | { ok: false; error: string }> {
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const { data: moduleRow, error: moduleError } = await supabase
+  const { data: moduleRow, error: moduleError } = await db
     .from("modules")
     .select("id,course_id,title")
     .eq("id", moduleId)
@@ -180,7 +180,7 @@ async function loadExamContext(
   if (moduleError) return { ok: false, error: moduleError.message };
   if (!moduleRow) return { ok: false, error: "That chapter does not exist." };
 
-  const { data: courseRow, error: courseError } = await supabase
+  const { data: courseRow, error: courseError } = await db
     .from("courses")
     .select("id,slug,title,language")
     .eq("id", (moduleRow as { course_id: string }).course_id)
@@ -191,7 +191,7 @@ async function loadExamContext(
 
   const course = courseRow as { id: string; slug: string; title: string; language: string | null };
 
-  const bundle = await getCourseBundle(supabase, userId, course.slug);
+  const bundle = await getCourseBundle(db, userId, course.slug);
   if (!bundle) return { ok: false, error: "That course does not exist." };
 
   const chapterIndex = bundle.course.chapters.findIndex((chapter) => chapter.id === moduleId);
@@ -212,7 +212,7 @@ async function loadExamContext(
   return {
     ok: true,
     context: {
-      supabase,
+      db,
       courseId: course.id,
       courseTitle: course.title,
       language: course.language || "text",
@@ -235,8 +235,8 @@ export async function setRigorousAction(
   const user = await requireUser();
 
   try {
-    const supabase = await createSupabaseServerClient();
-    const { data: courseRow } = await supabase
+    const db = await userDb();
+    const { data: courseRow } = await db
       .from("courses")
       .select("id")
       .eq("id", courseId)
@@ -245,7 +245,7 @@ export async function setRigorousAction(
 
     if (!courseRow) return { ok: false, error: "That course does not exist." };
 
-    const { error } = await supabase
+    const { error } = await db
       .from("courses")
       .update({ rigorous: enabled })
       .eq("id", courseId)
@@ -254,9 +254,7 @@ export async function setRigorousAction(
     if (error) {
       return {
         ok: false,
-        error: /rigorous|schema cache/i.test(error.message)
-          ? "This database has not run the latest supabase/schema.sql yet — apply it in the Supabase SQL editor first."
-          : error.message,
+        error: error.message,
       };
     }
 
@@ -280,9 +278,9 @@ export async function startChapterQuizAction(
     const loaded = await loadExamContext(user.id, moduleId);
     if (!loaded.ok) return loaded;
     const { context } = loaded;
-    const { supabase } = context;
+    const { db } = context;
 
-    const { data: row, error: rowError } = await supabase
+    const { data: row, error: rowError } = await db
       .from("chapter_quizzes")
       .select("questions")
       .eq("user_id", user.id)
@@ -314,7 +312,7 @@ export async function startChapterQuizAction(
       validate: validateQuiz,
     });
 
-    const { error: saveError } = await supabase.from("chapter_quizzes").upsert(
+    const { error: saveError } = await db.from("chapter_quizzes").upsert(
       {
         user_id: user.id,
         course_id: context.courseId,
@@ -328,7 +326,7 @@ export async function startChapterQuizAction(
       // Uncached is survivable, but submitting would fail next — say so now.
       return {
         ok: false,
-        error: `The exam was written but could not be saved (${saveError.message}). Apply the latest supabase/schema.sql and reopen the exam.`,
+        error: `The exam was written but could not be saved (${saveError.message}). Restore your data/freedemy.db backup and reopen the exam.`,
       };
     }
 
@@ -393,9 +391,9 @@ export async function submitChapterQuizAction(
     const loaded = await loadExamContext(user.id, moduleId);
     if (!loaded.ok) return loaded;
     const { context } = loaded;
-    const { supabase } = context;
+    const { db } = context;
 
-    const { data: row, error: rowError } = await supabase
+    const { data: row, error: rowError } = await db
       .from("chapter_quizzes")
       .select("questions,best_score,attempts")
       .eq("user_id", user.id)
@@ -506,7 +504,7 @@ export async function submitChapterQuizAction(
     const bestScore = Math.max(previousBest, score);
     const attempts = previousAttempts + 1;
 
-    const { error: saveError } = await supabase.from("chapter_quizzes").upsert(
+    const { error: saveError } = await db.from("chapter_quizzes").upsert(
       {
         user_id: user.id,
         course_id: context.courseId,

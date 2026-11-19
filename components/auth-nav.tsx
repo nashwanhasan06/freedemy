@@ -1,7 +1,9 @@
 import Link from "next/link";
 
+import { SettingsButton } from "@/components/settings-button";
 import { SignOutButton } from "@/components/sign-out-button";
 import { displayName, getCurrentUser, type CurrentUser } from "@/lib/auth";
+import { settingsViewFor } from "@/lib/settings";
 
 const linkClass =
   "rounded-lg px-1.5 py-1.5 text-[0.8rem] font-medium text-muted-foreground transition-colors hover:text-foreground sm:px-2 sm:text-[0.85rem]";
@@ -18,6 +20,7 @@ type AuthNavProps = {
  */
 export async function AuthNav({ user: resolved }: AuthNavProps = {}) {
   const user = resolved === undefined ? await getCurrentUser() : resolved;
+  const settings = user ? await settingsViewFor(user.id) : null;
 
   if (!user) {
     return (
@@ -40,6 +43,7 @@ export async function AuthNav({ user: resolved }: AuthNavProps = {}) {
       <span className="hidden text-[0.8rem] text-muted-foreground sm:inline">
         {displayName(user.name)}
       </span>
+      {settings && <SettingsButton initial={settings} />}
       <SignOutButton />
     </>
   );

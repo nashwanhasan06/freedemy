@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
-import { AuthForm } from "@/components/auth/auth-form";
+import { AccountPicker } from "@/components/auth/account-picker";
 import { Brand } from "@/components/brand";
-import { SetupNotice } from "@/components/setup-notice";
-import { isSupabaseConfigured } from "@/lib/env";
+import { adminDb } from "@/lib/storage";
 
 export const metadata: Metadata = { title: "Sign in" };
 export const instant = false;
@@ -14,21 +14,20 @@ function safeNext(value: string | string[] | undefined): string {
   return "/dashboard";
 }
 
-export default async function LoginPage({
-  searchParams,
-}: PageProps<"/login">) {
+/**
+ * The account picker: every local account is a card, and clicking one asks
+ * only for that account's password. There is no email field anywhere.
+ */
+export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const params = await searchParams;
   const next = safeNext(params.next);
 
-  if (!isSupabaseConfigured()) {
-    return (
-      <main className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center px-4 py-16">
-        <SetupNotice />
-      </main>
-    );
-  }
-
-  const error = Array.isArray(params.error) ? params.error[0] : params.error;
+  const { data } = await adminDb()
+    .from("users")
+    .select("id, display_name")
+    .order("created_at", { ascending: true });
+  const rows: { id: string; display_name: string }[] = data ?? [];
+  const accounts = rows.map((row) => ({ id: row.id, name: row.display_name }));
 
   return (
     <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-4 py-14">
@@ -38,18 +37,28 @@ export default async function LoginPage({
           <div>
             <h1 className="text-[1.25rem] font-semibold tracking-tight">Welcome back</h1>
             <p className="mt-1 text-[0.82rem] text-muted-foreground">
-              Your notes, marks and tutor conversations are waiting.
+              {accounts.length > 0
+                ? "Pick your account — your notes, marks and tutor conversations are waiting."
+                : "No accounts on this machine yet."}
             </p>
           </div>
         </div>
 
-        {error && (
-          <p className="mb-4 rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[0.78rem] text-danger-ink">
-            {error}
-          </p>
+        {accounts.length > 0 ? (
+          <AccountPicker accounts={accounts} next={next} />
+        ) : (
+          <div className="flex flex-col items-center gap-4 text-center">
+            <p className="text-[0.85rem] leading-relaxed text-muted-foreground">
+              Create the first account to start building courses.
+            </p>
+            <Link
+              href={`/signup${next !== "/dashboard" ? `?next=${encodeURIComponent(next)}` : ""}`}
+              className="cta-glow inline-flex h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-[#2753ff] via-[#4f46e5] to-[#7c3aed] px-6 text-[0.9rem] font-medium text-white"
+            >
+              Create an account
+            </Link>
+          </div>
         )}
-
-        <AuthForm mode="signin" next={next} />
       </div>
     </main>
   );

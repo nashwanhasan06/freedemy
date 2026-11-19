@@ -1,4 +1,4 @@
-/** Row shapes for the tables in supabase/schema.sql. */
+/** Row shapes for the tables in schema.sqlite.sql. */
 
 export type CourseRow = {
   id: string;

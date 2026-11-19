@@ -8,7 +8,7 @@ import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
 import { requireUser } from "@/lib/auth";
 import { listCourseSummaries } from "@/lib/db/courses";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 
 export const metadata = {
   title: "Your dashboard",
@@ -18,11 +18,11 @@ export const instant = false;
 export default async function DashboardPage() {
   await connection();
   const user = await requireUser("/dashboard");
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
   // Starter courses are seeded once at signup, never here: re-seeding on an
   // empty dashboard would resurrect courses the user deliberately deleted.
-  const entries = await listCourseSummaries(supabase, user.id);
+  const entries = await listCourseSummaries(db, user.id);
 
   return (
     <>

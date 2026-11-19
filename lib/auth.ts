@@ -1,9 +1,10 @@
 import "server-only";
 
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { isSupabaseConfigured } from "@/lib/env";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { SESSION_COOKIE, verifySession } from "@/lib/auth/crypto";
+import { adminDb } from "@/lib/storage";
 
 export type CurrentUser = {
   id: string;
@@ -12,40 +13,27 @@ export type CurrentUser = {
 };
 
 /**
- * Resolves the signed-in user from the auth cookie. `getUser()` verifies the
- * token with Supabase instead of trusting the cookie contents.
+ * Resolves the signed-in user from the session cookie. The cookie is
+ * HMAC-verified (see `lib/auth/crypto.ts`) and the account must still exist
+ * in the local `users` table — a forged or stale cookie resolves to null.
  */
 export async function getCurrentUser(): Promise<CurrentUser | null> {
-  if (!isSupabaseConfigured()) return null;
+  const store = await cookies();
+  const userId = verifySession(store.get(SESSION_COOKIE)?.value);
+  if (!userId) return null;
 
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) return null;
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("full_name")
-    .eq("id", user.id)
+  const { data } = await adminDb()
+    .from("users")
+    .select("id, display_name")
+    .eq("id", userId)
     .maybeSingle();
+  if (!data) return null;
 
-  const name =
-    (profile?.full_name as string | null) ||
-    (user.user_metadata?.full_name as string | undefined) ||
-    user.email?.split("@")[0] ||
-    "Student";
-
-  return { id: user.id, email: user.email ?? null, name };
+  return { id: data.id, email: null, name: data.display_name };
 }
 
 /** Use in pages and server actions that must not render for anonymous users. */
 export async function requireUser(nextPath?: string): Promise<CurrentUser> {
-  if (!isSupabaseConfigured()) {
-    redirect("/setup");
-  }
-
   const user = await getCurrentUser();
   if (!user) {
     redirect(nextPath ? `/login?next=${encodeURIComponent(nextPath)}` : "/login");

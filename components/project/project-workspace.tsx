@@ -387,10 +387,9 @@ function SetupCard() {
         One-time database setup
       </h2>
       <p className="mt-2 text-[0.82rem] leading-relaxed text-warning-ink/90">
-        Final projects need two tables that are not in your database yet. Open the Supabase SQL
-        editor, paste the <code className="rounded bg-warning/15 px-1 py-0.5">course_projects</code>{" "}
-        block from <code className="rounded bg-warning/15 px-1 py-0.5">supabase/schema.sql</code>
-        , run it once, then reload this page. Everything else on the site keeps working.
+        The database file is missing the final-project tables. Stop Freedemy and restart it so{" "}
+        <code className="rounded bg-warning/15 px-1 py-0.5">schema.sqlite.sql</code> is re-applied,
+        then reload this page. Everything else on the site keeps working.
       </p>
     </div>
   );

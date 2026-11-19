@@ -7,7 +7,8 @@ import type { CourseFormState } from "@/lib/actions/types";
 import { startCourseJob } from "@/lib/ai/jobs";
 import { loadPlaylist, PlaylistError, type Playlist } from "@/lib/ai/playlist";
 import { requireUser } from "@/lib/auth";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import type { DbClient } from "@/lib/storage";
+import { userDb } from "@/lib/storage/server";
 
 const YOUTUBE_URL =
   /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/;
@@ -26,7 +27,7 @@ function field(formData: FormData, name: string): string {
 
 /** Playlist videos are the build's work queue. Missing rows mean a restart. */
 async function ensureCourseVideos(
-  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  db: DbClient,
   courseId: string,
   playlist: Playlist,
 ): Promise<string | null> {
@@ -38,7 +39,7 @@ async function ensureCourseVideos(
     duration_seconds: entry.durationSeconds,
   }));
 
-  const { error } = await supabase
+  const { error } = await db
     .from("course_videos")
     .upsert(rows, { onConflict: "course_id,video_id", ignoreDuplicates: true });
   return error?.message ?? null;
@@ -79,9 +80,9 @@ export async function createCourseAction(
   }
 
   const sourceId = playlistId ?? (videoId as string);
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const { data: existing, error: existingError } = await supabase
+  const { data: existing, error: existingError } = await db
     .from("courses")
     .select("id,slug,status")
     .eq("user_id", user.id)
@@ -100,7 +101,7 @@ export async function createCourseAction(
       redirect(`/generating?course=${existing.id}`);
     }
 
-    const { error: restartError } = await supabase
+    const { error: restartError } = await db
       .from("courses")
       .update({ status: "queued", stage: "Queued", error: null })
       .eq("id", existing.id);
@@ -108,7 +109,7 @@ export async function createCourseAction(
     if (restartError) return { error: restartError.message };
 
     if (playlist) {
-      const videosError = await ensureCourseVideos(supabase, existing.id, playlist);
+      const videosError = await ensureCourseVideos(db, existing.id, playlist);
       if (videosError) return { error: videosError };
     }
 
@@ -116,7 +117,7 @@ export async function createCourseAction(
     redirect(`/generating?course=${existing.id}`);
   }
 
-  const { data: created, error } = await supabase
+  const { data: created, error } = await db
     .from("courses")
     .insert({
       user_id: user.id,
@@ -136,7 +137,7 @@ export async function createCourseAction(
 
   const courseId = created.id as string;
   if (playlist) {
-    const videosError = await ensureCourseVideos(supabase, courseId, playlist);
+    const videosError = await ensureCourseVideos(db, courseId, playlist);
     if (videosError) return { error: videosError };
   }
 
@@ -148,9 +149,9 @@ export async function createCourseAction(
 
 export async function retryCourseAction(courseId: string): Promise<void> {
   const user = await requireUser("/dashboard");
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const { data: course } = await supabase
+  const { data: course } = await db
     .from("courses")
     .select("id,video_id")
     .eq("id", courseId)
@@ -161,14 +162,14 @@ export async function retryCourseAction(courseId: string): Promise<void> {
     redirect("/dashboard");
   }
 
-  await supabase
+  await db
     .from("courses")
     .update({ status: "queued", stage: "Queued", error: null })
     .eq("id", course.id);
 
   // Playlist courses: give every failed video a fresh set of tries (the
   // single-video path has no rows here, so this is a no-op for it).
-  await supabase
+  await db
     .from("course_videos")
     .update({ status: "queued", attempts: 0, error: null })
     .eq("course_id", course.id)
@@ -183,9 +184,9 @@ export async function deleteCourseAction(
   courseId: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const user = await requireUser("/dashboard");
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const { error } = await supabase
+  const { error } = await db
     .from("courses")
     .delete()
     .eq("id", courseId)

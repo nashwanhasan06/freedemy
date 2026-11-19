@@ -9,7 +9,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { requireUser } from "@/lib/auth";
 import { getCourseBundle } from "@/lib/db/courses";
 import { courseLessons } from "@/lib/course";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 import type { TutorMessage } from "@/lib/actions/types";
 
 export const metadata: Metadata = { title: "Assignment tutor" };
@@ -23,9 +23,9 @@ export default async function TutorPage({
   const { slug } = await params;
   const query = await searchParams;
   const user = await requireUser(`/course/${slug}/tutor`);
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const bundle = await getCourseBundle(supabase, user.id, slug);
+  const bundle = await getCourseBundle(db, user.id, slug);
   if (!bundle) notFound();
 
   const lessons = courseLessons(bundle.course);
@@ -40,7 +40,7 @@ export default async function TutorPage({
 
   // Newest 60, reversed below: a long session must show its latest turns,
   // not the first 60 it ever had.
-  const { data } = await supabase
+  const { data } = await db
     .from("tutor_messages")
     .select("id,role,content,at_seconds,created_at")
     .eq("user_id", user.id)

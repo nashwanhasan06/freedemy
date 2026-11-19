@@ -1,4 +1,4 @@
-/** Shared content model. Rows from Supabase are mapped into these shapes. */
+/** Shared content model. Database rows are mapped into these shapes. */
 
 export type KeyTerm = {
   term: string;
@@ -37,7 +37,7 @@ export type Mcq = {
 };
 
 export type ShortAnswer = {
-  /** Exercise row id in Supabase; demo fixtures used for seeding have none. */
+  /** Exercise row id in the database; demo fixtures used for seeding have none. */
   id?: string;
   prompt: string;
   placeholder: string;

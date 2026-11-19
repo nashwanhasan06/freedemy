@@ -12,88 +12,86 @@ attempt, mark and conversation is stored per student.
 
 | Area | Now |
 | --- | --- |
-| Course generation | Real. Transcript is fetched from YouTube's caption track, summarised window by window, then structured by the NIM model. No hardcoded courses are produced. |
+| Course generation | Real. Transcript is fetched from YouTube's caption track, summarised window by window, then structured by the active AI model. No hardcoded courses are produced. |
 | Tutor | Real. Grounded in the section's notes, key terms and exercises, with a timestamp back into the video. Conversation history persists and is compacted into a rolling summary once a session outgrows the prompt budget. |
 | Grading | Real. MCQs and short answers are graded against the exercise, code is reviewed by the model with per-line errors, warnings and tips. |
-| Progress | Real. Best score, attempts and completion are stored in Postgres and drive every badge and progress bar. |
+| Progress | Real. Best score, attempts and completion are stored in SQLite and drive every badge and progress bar. |
 | Final project | Real. One capstone brief per course, written from that course's own sections; submitted code is reviewed against its requirements and a pass marks the course complete. |
-| Accounts | Real. Supabase Auth with email + password; RLS scopes every row to its owner. Sign-in and sign-up live on their own pages; the landing page invites visitors to paste a link first and only asks for an account when they press Generate, returning them to the same prefilled field. |
+| Accounts | Real. Local accounts only — no email provider anywhere. Sign-in shows every account on the machine as a card; passwords are scrypt-hashed and recovery goes through each account's own security question. Every account saves its own AI provider and API key in Settings, and a key saved for one vendor is never offered to another. |
 
-The three authored demo courses from the original prototype are seeded into a new account's
-database on first visit, so there is something to study before generating anything.
+The three authored demo courses from the original prototype are seeded into a new account at
+sign-up, so there is something to study before generating anything.
 
 ## Stack
 
 - Next.js 16.4 (App Router, Cache Components, Turbopack), React 19, Tailwind v4
-- Supabase: Postgres, Auth, Row Level Security — `@supabase/ssr`
-- NVIDIA NIM (OpenAI-compatible chat completions) for generation, grading and tutoring
-- Model calls are paced by a sliding-window scheduler capped at **40 requests/minute**
+- Embedded SQLite (`better-sqlite3`, `data/freedemy.db`) — schema in `schema.sqlite.sql`,
+  applied automatically at first run. No Postgres, no Docker, no hosted services.
+- Local auth: scrypt password hashes, HMAC-signed session cookie, security-question recovery
+- Any of six AI providers — NVIDIA NIM, OpenAI, Anthropic, DeepSeek, Google Gemini or
+  **Custom** (your own OpenAI-compatible endpoint) — chosen
+  machine-wide in `.env.local` or per account in Settings
+- Rate limits belong to the provider account: NIM defaults to a **40 requests/minute** window,
+  the others run unlimited unless you opt in with `AI_RPM_LIMIT`
 
 ## Setup
 
-### 1. Install
+Everything runs on your machine: the database, the accounts, the AI keys. There
+is nothing to sign up for besides the AI vendor you choose.
+
+### 1. Get the code
 
 ```bash
-npm install
+git clone https://github.com/nashwanhasan06/freedemy.git
+cd freedemy
 ```
 
-### 2. Create the database
+No git? Download the latest release zip from
+<https://github.com/nashwanhasan06/freedemy/releases> and extract it — every
+command below works the same.
 
-1. Create a project at <https://supabase.com/dashboard>.
-2. Open **SQL Editor → New query**, paste all of `supabase/schema.sql`, and run it.
-   This creates the tables, indexes, the profile trigger, and RLS policies on everything.
-   The file is idempotent: run it again after pulling changes that add tables (the final
-   project added `course_projects` and `project_submissions`).
-3. In **Authentication → URL Configuration** set:
-   - Site URL: `http://localhost:3000`
-   - Redirect URLs: `http://localhost:3000/auth/callback`
-
-If you leave email confirmation on (the default), a new account must click the link in its
-inbox before signing in. Turn it off under **Authentication → Providers → Email** for faster
-local testing.
-
-### 3. Install the transcript tool
-
-YouTube requires a proof-of-origin token to download captions, so Freedemy shells out to
-[yt-dlp](https://github.com/yt-dlp/yt-dlp), which obtains one automatically:
+### 2. Run the setup file
 
 ```bash
-winget install yt-dlp        # Windows
-pip install -U yt-dlp        # any platform
+node setup.mjs
 ```
 
-Check it with `yt-dlp --version`. If it is not on `PATH`, point `YTDLP_PATH` at the binary.
-There is a direct caption-endpoint fallback in `lib/ai/transcript.ts`, but it is blocked on
-many networks — yt-dlp is what makes link-to-course reliable.
+One file, one run. It checks your Node version (≥ 20.9), runs `npm install`
+(and verifies the native SQLite binding actually loads), creates `.env.local`
+from `.env.example` — every value in it is optional — and installs
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) if it is missing. yt-dlp is what
+fetches YouTube's caption track, which is what makes link-to-course work.
 
-### 4. Configure environment variables
-
-```bash
-cp .env.example .env.local
-```
-
-Fill in:
-
-- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Project Settings → API.
-- `SUPABASE_SERVICE_ROLE_KEY` — same page, the secret key. The generator writes course
-  content and usage rows on the server. It is never imported into client code.
-- `NVIDIA_NIM_API_KEY` — your NIM key.
-- `NVIDIA_NIM_MODEL` — defaults to `nvidia/nemotron-3-ultra-550b-a55b`. Any NIM-hosted chat model
-  that supports JSON output works, but the account only has a subset of the catalogue enabled
-  (`GET /v1/models` lists more than your key can call). A cut-off model returns HTTP 404.
-- `RESEND_API_KEY`, `EMAIL_FROM` — optional, for password-reset emails. The reset link is minted
-  with the service-role key and sent through Resend (`lib/email.ts`), so Supabase's own SMTP
-  settings are not involved. `EMAIL_FROM` must be a sender verified in Resend → Domains; test
-  mode only allows `Freedemy <onboarding@resend.dev>` and only delivers to your own account
-  address. Without a key the link is printed to the server log instead (development only).
-
-### 5. Run
+### 3. Run
 
 ```bash
 npm run dev
 ```
 
-Open <http://localhost:3000>, create an account, and paste a coding lecture with captions.
+Open <http://localhost:3000>, create an account (display name, password, and a
+security question for recovery — no email is involved anywhere), then open
+**Settings** (gear icon, top right) and paste your AI API key:
+
+| Provider | Get a key |
+| --- | --- |
+| NVIDIA NIM | <https://build.nvidia.com> (the default) |
+| OpenAI | <https://platform.openai.com/api-keys> |
+| Anthropic | <https://console.anthropic.com> |
+| DeepSeek | <https://platform.deepseek.com> |
+| Google Gemini | <https://aistudio.google.com/apikey> |
+| Custom | Any OpenAI-compatible endpoint — Ollama, LM Studio, LiteLLM, a proxy |
+
+Pick **Custom** and paste the endpoint URL (keep the `/v1` suffix, e.g.
+`http://localhost:11434/v1`) plus a model name; the API key is optional, since
+a local gateway usually needs none.
+
+The key is stored on this machine, for your account only — it never round-trips
+to the browser and never leaves the machine. You can also set it machine-wide
+instead: copy `.env.example` to `.env.local`, fill in `AI_PROVIDER` and
+`AI_API_KEY`, and restart. A per-account key always wins.
+
+That's the whole setup. Paste a coding lecture with captions and press
+Generate.
 
 ## How generation works
 
@@ -114,7 +112,7 @@ Open <http://localhost:3000>, create an account, and paste a coding lecture with
 5. **Write** — one call per section, from that section's own transcript slice: 3–4 note blocks of
    120–220 words of Markdown prose with worked examples, fenced code, tables and ```mermaid
    diagrams, plus exactly the exercises the plan asked for (starter code, solution, hint).
-6. **Persist** — modules, lessons, and exercises are written to Supabase; the course row moves
+6. **Persist** — modules, lessons, and exercises are written to SQLite; the course row moves
    through `queued → fetching → outlining → writing → ready` (or `failed`, with a retry).
 
 The generating screen polls `/api/courses/[id]/status` every 1.6s.
@@ -124,19 +122,22 @@ still `writing` (and after a `failed` build, so finished work is never lost), sh
 banner, and re-renders every 20s so newly written sections appear without a manual reload. Only
 a course with zero sections yet sends the student back to the generating screen.
 
-### Staying inside 40 RPM
+### Staying inside the provider's rate limit
 
-`lib/ai/limiter.ts` enforces five things:
+`lib/ai/limiter.ts` keeps one limiter **per provider account** (`aiLimiterFor`), so a
+student on OpenAI never inherits NIM's window, and a NIM 429 cooldown only pauses NIM's
+lanes. Within a window it enforces:
 
-- A rolling 60-second window capped at `AI_RPM_LIMIT` (40). No burst can exceed it.
+- A rolling 60-second cap when the provider has one — NIM defaults to 40 RPM;
+  `AI_RPM_LIMIT` opts any provider into a window (and can lower NIM's).
 - Every real HTTP request takes a slot of its own — including each retry — so a
   call that retries four times costs four slots, not one.
 - Separate in-flight caps per lane: at most `AI_CONCURRENCY` (4) interactive requests
   (tutor, grading) and at most `AI_BACKGROUND_CONCURRENCY` (10) background generation
   requests — a busy build cannot fill every slot and starve a student.
-- Background generation is capped at `rpm - AI_INTERACTIVE_RESERVE` (32/min), so a student
-  submitting an assignment or asking the tutor always has ~8 requests/minute of headroom.
-- On a provider 429 the whole account pauses together and the ceiling itself shrinks by
+- On a capped provider, background generation is held below `rpm - AI_INTERACTIVE_RESERVE`,
+  so a student submitting an assignment or asking the tutor always has headroom.
+- On a provider 429 the whole lane pauses together and the ceiling itself shrinks by
   25% (floor 4/min), then earns one request back per quiet minute — so the client stays
   under whatever the account's real limit turns out to be.
 
@@ -146,8 +147,8 @@ A long build slows down instead of failing. Every call is logged to `ai_usage` f
 
 A build costs roughly `windows + 1 + modules + lessons` model calls: a 3.5-hour lecture needs
 ~11 + 1 + 4 + 25 ≈ 40 calls (a couple of minutes), and even a 70-hour marathon (~210 map calls
-plus the outline, plans and lessons) is paced under 40 RPM, so it takes longer but never
-crosses the account limit.
+plus the outline, plans and lessons) is paced under the provider's window, so on NIM it takes
+longer but never crosses the 40 RPM account limit.
 
 > The limiter is process-local, which is correct for `next dev` / `next start` on one machine.
 > If you scale to several instances, move the window to Redis or a Postgres table so the cap is
@@ -200,33 +201,46 @@ is a query for a passing submission.
 
 ## Data model and security
 
-`supabase/schema.sql` defines:
+`schema.sqlite.sql` (applied automatically at first run, idempotent) defines:
 
-- `profiles` — one row per auth user, created by trigger.
-- `courses` — owner, slug, video metadata, generation status and stage.
-- `modules` → `lessons` → `exercises` — the course content, with notes/key terms as JSONB.
+- `users` — display name, scrypt password hash, security question + answer hash.
+- `user_settings` — per-account AI provider, API key, model and endpoint overrides.
+- `courses` → `course_videos` — owner, slug, video metadata, generation status and stage.
+- `modules` → `lessons` → `exercises` — the course content, with notes/key terms as JSON.
 - `submissions` — every graded attempt, with feedback and errors.
 - `lesson_progress` — best score, attempts, completion per student per lesson.
 - `course_projects` — the generated capstone brief, its requirements and the starter code.
 - `project_submissions` — every project attempt with its score, checklist and errors.
-- `tutor_messages` — the persisted conversation per student per lesson.
-- `tutor_summaries` — one rolling summary per student per lesson, plus the timestamp it covers.
-- `ai_usage` — model call log (service role only).
+- `tutor_messages` / `tutor_summaries` — the persisted conversation per student per lesson,
+  plus the rolling summary of older turns.
+- `chapter_quizzes` — the end-of-module exam questions.
+- `ai_usage` — model call log for auditing.
 
-Every table has RLS enabled. Students can only touch rows they own; content tables are reachable
-only through a course they own. `ai_usage` has RLS with no policies, so only the service role
-can read or write it. The anon key is safe to ship; the service role key never leaves the server.
+The storage layer (`lib/storage/`) speaks the same query-builder shape the app
+used against Postgres, but scope rules replace row-level security: a
+session-bound client (`userDb()`) can only ever read and write its own rows —
+every query gets the owner filter applied in the builder, user-scoped inserts
+auto-inject `user_id`, and `users` / `user_settings` are server-only tables.
+An anonymous request gets a client that matches nothing, exactly like the old
+anon role.
 
-Server Actions re-read the session and derive the user id from the verified token — never from
-client input — and the database re-checks ownership through RLS on every write.
+Server Actions re-read the session cookie (HMAC-verified against
+`data/session.secret`, created automatically) and derive the user id from it —
+never from client input. Login is rate-limited to five failures per 30 seconds
+per account, and API keys are read from SQLite on the server only; the client
+sees whether a key exists and its last four characters, nothing more.
 
 ## Project layout
 
 ```
+setup.mjs                   The one-time setup: Node check, npm install, .env.local, yt-dlp
 proxy.ts                     Session refresh + optimistic auth redirects (Next 16 proxy)
+instrumentation.ts           Boot hook: silent daily yt-dlp self-update
+schema.sqlite.sql            Tables + indexes, applied automatically at first run
 app/
   page.tsx                   Landing page and the link form (for visitors too; Generate sends them to sign in)
-  login/ signup/ auth/       Auth pages and the PKCE callback
+  login/ signup/ recover/    Account picker + password, sign-up, security-question recovery
+  setup/                     "Finish the setup" checklist (only if something is missing)
   dashboard/                 The student's courses, statuses and progress
   generating/                Live generation screen
   course/[slug]/             Course workspace (player, notes, assignment, tutor tab)
@@ -234,16 +248,22 @@ app/
   course/[slug]/project/     End-of-course capstone: brief, code submission, review
   api/courses/[id]/status/   Polling endpoint for generation
 lib/
+  storage/                   Embedded SQLite layer: query builder + per-user scope rules
+  auth.ts + auth/            Session lookup, scrypt hashing, HMAC cookie, lockout
+  settings.ts                Settings view model (key never leaves the server)
+  updates.ts                Silent daily yt-dlp self-update (boot hook)
+  actions/                   Server Actions: auth, courses, grading, tutor, settings
+  ai/provider.ts             The six-provider config table + env resolution
+  ai/user-provider.ts        Per-account provider/key resolution over the env
   ai/transcript.ts           YouTube metadata + captions
   ai/generate.ts             Map → outline → write pipeline
-  ai/limiter.ts              40 RPM scheduler
-  ai/nim.ts                  NIM client, JSON validation, retries, usage log
+  ai/limiter.ts              Per-provider rate limiters
+  ai/nim.ts                  Transport (OpenAI wire vs Anthropic), JSON validation, retries, usage log
   ai/prompts.ts              All model prompts
   ai/tutor-session.ts        Tutor thread window and rolling summary compaction
-  actions/                   Server Actions: auth, courses, grading, tutor
   db/                        Row mapping, dashboard queries, demo seeding
-  supabase/                  Request-scoped and service-role clients
-supabase/schema.sql          Tables, policies, triggers
+components/
+  settings-button.tsx        The Settings popup: provider, key, model, endpoint
 ```
 
 ## Operational notes
@@ -253,17 +273,40 @@ supabase/schema.sql          Tables, policies, triggers
   `startCourseJob` to a queue/worker; the course row already carries the status the UI needs.
 - Videos without captions fail with a clear message; there is no audio transcription fallback yet.
 - `yt-dlp` must be installed on the machine that runs generation. It also needs to be reachable
-  from the server process (not the browser).
-- If the NIM model does not support `response_format: json_object`, the client still extracts the
-  first JSON object from the reply and retries once with a repair prompt.
-- `AI_RPM_LIMIT` exists so the account ceiling can be lowered for a smaller plan without touching
-  code.
+  from the server process (not the browser). It self-updates silently once a day.
+- If the active model does not support `response_format: json_object`, the client still extracts
+  the first JSON object from the reply and retries once with a repair prompt.
+- `AI_RPM_LIMIT` opts any provider into a window (or lowers NIM's) without touching code.
+- Everything stateful lives in `data/` — the SQLite database and the session secret. Back up that
+  folder to back up the whole app; delete it to start over.
+- There is no in-app updater: update dependencies with `npm update`, yt-dlp with `yt-dlp -U`
+  (or leave it to the daily silent update), and the app with `git pull`.
 
 ## Scripts
 
 ```bash
+node setup.mjs # first-time setup (also re-runnable; safe to run after git pull)
 npm run dev     # Next dev server
 npm run build   # Production build
 npm start       # Serve the build
 npm run lint    # ESLint
 ```
+
+### Migrating an account from the old hosted version
+
+If you used the Supabase-hosted Freedemy before this repo went local,
+`scripts/export-supabase.mjs` copies one student's rows into `data/freedemy.db`,
+preserving every id so foreign keys keep pointing at the same rows. It needs
+`NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`
+(service-role key — row security no longer exists locally) plus credentials for
+the local account:
+
+```bash
+node scripts/export-supabase.mjs --dry-run --user "<name>"   # preview
+MIGRATE_PASSWORD=... MIGRATE_QUESTION=... MIGRATE_ANSWER=... \
+  node scripts/export-supabase.mjs --user "<name>"
+```
+
+It writes a `VACUUM INTO` backup next to the database first, and inserts with
+`INSERT OR IGNORE`, so re-running is safe. Once your data is local, delete the
+two Supabase variables — nothing else in the app reads them.

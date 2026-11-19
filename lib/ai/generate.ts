@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { adminDb, type DbClient } from "@/lib/storage";
 
 import { AiError, nimJson } from "@/lib/ai/nim";
 import {
@@ -32,7 +32,6 @@ import {
   type Lecture,
   type TranscriptCue,
 } from "@/lib/ai/transcript";
-import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { CodeExercise, KeyTerm, Mcq, NoteBlock, ShortAnswer } from "@/lib/types";
 
 type MappedSegment = { title: string; start: number; end: number; points: string[] };
@@ -81,7 +80,7 @@ type CourseVideoRow = {
 };
 
 type BuildVideoParams = {
-  admin: SupabaseClient;
+  admin: DbClient;
   courseId: string;
   userId: string;
   videoId: string;
@@ -541,7 +540,7 @@ function cuesBetween(cues: TranscriptCue[], start: number, end: number): Transcr
 }
 
 async function setStatus(
-  admin: SupabaseClient,
+  admin: DbClient,
   courseId: string,
   patch: Record<string, unknown>,
 ): Promise<void> {
@@ -562,7 +561,10 @@ function friendlyError(error: unknown): string {
     }
     return `The model request failed${error.status ? ` (${error.status})` : ""}. Try again in a moment.`;
   }
-  if (error instanceof Error && /NVIDIA_NIM_API_KEY|SUPABASE_SERVICE_ROLE_KEY/.test(error.message)) {
+  if (
+    error instanceof Error &&
+    /AI_API_KEY|AI_PROVIDER|NVIDIA_NIM_API_KEY/.test(error.message)
+  ) {
     return error.message;
   }
   // Anything else is an internal detail (SQL constraint names, module paths).
@@ -584,7 +586,7 @@ function friendlyError(error: unknown): string {
  * checks — global chapter numbering is assigned once at the end of the build.
  */
 async function assertCompleteCoverage(
-  admin: SupabaseClient,
+  admin: DbClient,
   courseId: string,
   duration: number,
   courseVideoId: string | null = null,
@@ -689,7 +691,7 @@ async function assertCompleteCoverage(
 }
 
 async function persistLesson(params: {
-  admin: SupabaseClient;
+  admin: DbClient;
   courseId: string;
   moduleId: string;
   courseVideoId: string | null;
@@ -801,7 +803,7 @@ async function persistLesson(params: {
  * One video's full build: captions → topic map → outline → plans → sections.
  * Shared by the single-video path and each video of a playlist course; throws
  * to the caller, which marks the course (or that video's row) failed.
- * Status transitions go to Supabase so the generating screen can follow along,
+ * Status transitions go to the database so the generating screen can follow along,
  * and every model call stays on the background lane of the rate limiter.
  */
 async function buildVideo(params: BuildVideoParams): Promise<BuildVideoResult> {
@@ -1127,14 +1129,14 @@ async function buildVideo(params: BuildVideoParams): Promise<BuildVideoResult> {
     // business.
     const modulePosition = new Map(moduleIds.map((id, index) => [id, index]));
     const staleLessonIds = (existingLessons ?? [])
-      .filter((row) => {
+      .filter((row: { id: string; module_id: string; position: number; start_seconds: number | null; end_seconds: number | null }) => {
         const index = modulePosition.get(row.module_id);
         if (index === undefined) return !playlist;
         const lesson = outline.modules[index].lessons[row.position];
         if (lesson === undefined) return true;
         return row.start_seconds !== lesson.start || row.end_seconds !== lesson.end;
       })
-      .map((row) => row.id);
+      .map((row: { id: string }) => row.id);
     if (staleLessonIds.length > 0) {
       await admin.from("lessons").delete().in("id", staleLessonIds);
     }
@@ -1143,8 +1145,8 @@ async function buildVideo(params: BuildVideoParams): Promise<BuildVideoResult> {
     // late timeout should not throw away finished sections.
     const alreadyWritten = new Set(
       (existingLessons ?? [])
-        .filter((row) => !staleLessonIds.includes(row.id))
-        .map((row) => `${row.module_id}:${row.position}`),
+        .filter((row: { id: string }) => !staleLessonIds.includes(row.id))
+        .map((row: { module_id: string; position: number }) => `${row.module_id}:${row.position}`),
     );
 
     const totalLessons = outline.modules.reduce(
@@ -1289,7 +1291,7 @@ export async function runCourseGeneration(params: {
   videoId: string;
 }): Promise<void> {
   const { courseId, userId, videoId } = params;
-  const admin = createSupabaseAdminClient();
+  const admin = adminDb();
 
   const { data: videos, error: videosError } = await admin
     .from("course_videos")
@@ -1352,7 +1354,7 @@ const RATE_LIMIT_WAITS = RATE_LIMIT_BACKOFF_MS.length;
  * real targets), so rows never clash mid-swap; rows already in place stay.
  */
 async function normaliseChapterSlots(
-  admin: SupabaseClient,
+  admin: DbClient,
   courseId: string,
   videos: CourseVideoRow[],
 ): Promise<void> {
@@ -1403,7 +1405,7 @@ async function normaliseChapterSlots(
 
 /** One run over a playlist's work queue: build each queued video in order. */
 async function runPlaylistGeneration(params: {
-  admin: SupabaseClient;
+  admin: DbClient;
   courseId: string;
   userId: string;
   videos: CourseVideoRow[];
@@ -1521,7 +1523,7 @@ async function runPlaylistGeneration(params: {
     .select("id,status")
     .eq("course_id", courseId);
   const pending = (endRows ?? []).filter(
-    (row) => row.status === "queued" || row.status === "building",
+    (row: { status: string }) => row.status === "queued" || row.status === "building",
   ).length;
   if (pending > 0) {
     await setStatus(admin, courseId, {
@@ -1541,7 +1543,7 @@ async function runPlaylistGeneration(params: {
  * number chapters and sections globally (playlist order, then start time) and
  * mark the course ready.
  */
-async function finalisePlaylist(admin: SupabaseClient, courseId: string): Promise<void> {
+async function finalisePlaylist(admin: DbClient, courseId: string): Promise<void> {
   const { data: videoRows } = await admin
     .from("course_videos")
     .select("id,position,status,duration_seconds")

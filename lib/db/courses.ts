@@ -1,4 +1,4 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "@/lib/storage";
 
 import type {
   Chapter,
@@ -175,11 +175,11 @@ function buildChapters(
 
 /** Full course with notes, exercises and the student's grades. */
 export async function getCourseBundle(
-  supabase: SupabaseClient,
+  db: DbClient,
   userId: string,
   slug: string,
 ): Promise<CourseBundle | null> {
-  const { data: courseData, error } = await supabase
+  const { data: courseData, error } = await db
     .from("courses")
     .select("*")
     .eq("user_id", userId)
@@ -199,20 +199,20 @@ export async function getCourseBundle(
     { data: quizData, error: quizError },
     { data: videoData },
   ] = await Promise.all([
-    supabase.from("modules").select("*").eq("course_id", courseRow.id),
-    supabase.from("lessons").select("*").eq("course_id", courseRow.id),
-    supabase.from("exercises").select("*").eq("course_id", courseRow.id),
-    supabase
+    db.from("modules").select("*").eq("course_id", courseRow.id),
+    db.from("lessons").select("*").eq("course_id", courseRow.id),
+    db.from("exercises").select("*").eq("course_id", courseRow.id),
+    db
       .from("lesson_progress")
       .select("course_id,lesson_id,score,correct,total")
       .eq("user_id", userId)
       .eq("course_id", courseRow.id),
-    supabase
+    db
       .from("chapter_quizzes")
       .select("module_id,best_score,attempts,passed")
       .eq("user_id", userId)
       .eq("course_id", courseRow.id),
-    supabase.from("course_videos").select("id,video_id,status").eq("course_id", courseRow.id),
+    db.from("course_videos").select("id,video_id,status").eq("course_id", courseRow.id),
   ]);
 
   // A database that has not run the latest schema.sql has no chapter_quizzes
@@ -264,10 +264,10 @@ export async function getCourseBundle(
  * only need ids, titles and durations.
  */
 export async function listCourseSummaries(
-  supabase: SupabaseClient,
+  db: DbClient,
   userId: string,
 ): Promise<CourseSummary[]> {
-  const { data: courseData, error } = await supabase
+  const { data: courseData, error } = await db
     .from("courses")
     .select("*")
     .eq("user_id", userId)
@@ -282,14 +282,14 @@ export async function listCourseSummaries(
 
   const [{ data: moduleData }, { data: lessonData }, { data: progressData }, { data: videoData }] =
     await Promise.all([
-      supabase.from("modules").select("*").in("course_id", courseIds),
-      supabase.from("lessons").select("*").in("course_id", courseIds),
-      supabase
+      db.from("modules").select("*").in("course_id", courseIds),
+      db.from("lessons").select("*").in("course_id", courseIds),
+      db
         .from("lesson_progress")
         .select("course_id,lesson_id,score,correct,total")
         .eq("user_id", userId)
         .in("course_id", courseIds),
-      supabase.from("course_videos").select("id,video_id").in("course_id", courseIds),
+      db.from("course_videos").select("id,video_id").in("course_id", courseIds),
     ]);
 
   const modules = (moduleData ?? []) as ModuleRow[];
@@ -298,7 +298,7 @@ export async function listCourseSummaries(
   const videoIds = new Map(
     ((videoData ?? []) as { id: string; video_id: string }[]).map((row) => [row.id, row.video_id]),
   );
-  const completed = await listProjectCompletions(supabase, userId, courseIds);
+  const completed = await listProjectCompletions(db, userId, courseIds);
 
   return courses.map((courseRow) => {
     const chapters: Chapter[] = byPosition(
@@ -358,8 +358,8 @@ export async function listCourseSummaries(
   });
 }
 
-export async function countCourses(supabase: SupabaseClient, userId: string): Promise<number> {
-  const { count, error } = await supabase
+export async function countCourses(db: DbClient, userId: string): Promise<number> {
+  const { count, error } = await db
     .from("courses")
     .select("id", { count: "exact", head: true })
     .eq("user_id", userId);

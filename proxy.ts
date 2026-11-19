@@ -1,10 +1,9 @@
-import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { SUPABASE_ANON_KEY, SUPABASE_URL, isSupabaseConfigured } from "@/lib/env";
+import { SESSION_COOKIE, verifySession } from "@/lib/auth/crypto";
 
 const PROTECTED = ["/dashboard", "/course", "/generating"];
-const AUTH_PAGES = ["/login", "/signup"];
+const AUTH_PAGES = ["/login", "/signup", "/recover"];
 
 function isProtected(pathname: string): boolean {
   return PROTECTED.some((path) => pathname === path || pathname.startsWith(`${path}/`));
@@ -15,53 +14,43 @@ function isAuthPage(pathname: string): boolean {
 }
 
 /**
- * Next 16 calls this "proxy" (the old middleware). Besides the session-cookie
- * refresh Supabase needs, it does the optimistic redirects: RLS still decides
- * every read and write on the server.
+ * Next 16 calls this "proxy" (the old middleware). The signature check here
+ * is a pure HMAC over the cookie — no database — so it stays cheap, but it
+ * must actually verify: trusting mere presence would bounce an invalid
+ * cookie between `/login` and `/dashboard` forever, since the pages verify
+ * the session themselves. A cookie that fails is cleared on the way out.
+ * Account existence is still re-checked in server code before anything
+ * private is rendered or written.
  */
-export async function proxy(request: NextRequest) {
-  let response = NextResponse.next({ request });
-
-  if (!isSupabaseConfigured()) {
-    return response;
-  }
-
-  const supabase = createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    cookies: {
-      getAll() {
-        return request.cookies.getAll();
-      },
-      setAll(cookiesToSet) {
-        cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
-        response = NextResponse.next({ request });
-        cookiesToSet.forEach(({ name, value, options }) => {
-          response.cookies.set(name, value, options);
-        });
-      },
-    },
-  });
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
+export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
+  const signedIn = verifySession(token) !== null;
+  const stale = Boolean(token) && !signedIn;
 
-  if (!user && isProtected(pathname)) {
+  if (!signedIn && isProtected(pathname)) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.search = `?next=${encodeURIComponent(`${pathname}${search}`)}`;
-    return NextResponse.redirect(url);
+    const response = NextResponse.redirect(url);
+    if (stale) response.cookies.set(SESSION_COOKIE, "", { maxAge: 0 });
+    return response;
   }
 
-  if (user && isAuthPage(pathname)) {
+  if (signedIn && isAuthPage(pathname)) {
     const url = request.nextUrl.clone();
     url.pathname = "/dashboard";
     url.search = "";
     return NextResponse.redirect(url);
   }
 
-  return response;
+  if (stale) {
+    const response = NextResponse.next();
+    response.cookies.set(SESSION_COOKIE, "", { maxAge: 0 });
+    return response;
+  }
+
+  return NextResponse.next();
 }
 
 export const config = {

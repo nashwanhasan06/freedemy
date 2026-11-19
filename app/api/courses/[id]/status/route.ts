@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { userDb } from "@/lib/storage/server";
 
 export async function GET(
   _request: Request,
@@ -13,9 +13,9 @@ export async function GET(
   }
 
   const { id } = await params;
-  const supabase = await createSupabaseServerClient();
+  const db = await userDb();
 
-  const { data: course } = await supabase
+  const { data: course } = await db
     .from("courses")
     .select("id,slug,title,status,stage,error,created_at,updated_at")
     .eq("id", id)
@@ -27,8 +27,8 @@ export async function GET(
   }
 
   const [{ count: lessonCount }, { count: moduleCount }] = await Promise.all([
-    supabase.from("lessons").select("id", { count: "exact", head: true }).eq("course_id", id),
-    supabase.from("modules").select("id", { count: "exact", head: true }).eq("course_id", id),
+    db.from("lessons").select("id", { count: "exact", head: true }).eq("course_id", id),
+    db.from("modules").select("id", { count: "exact", head: true }).eq("course_id", id),
   ]);
 
   return NextResponse.json(

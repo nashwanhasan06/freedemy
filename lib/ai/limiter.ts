@@ -2,7 +2,6 @@ import {
   AI_BACKGROUND_CONCURRENCY,
   AI_CONCURRENCY,
   AI_INTERACTIVE_RESERVE,
-  AI_RPM_LIMIT,
 } from "@/lib/env";
 
 export type Priority = "interactive" | "background";
@@ -10,9 +9,13 @@ export type Priority = "interactive" | "background";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Sliding-window limiter for the NIM account.
+ * Sliding-window limiter for the model account.
  *
- * - Never more than `rpm` calls in any rolling 60s window.
+ * - `rpm: number` — never more than `rpm` calls in any rolling 60s window.
+ *   This is the NIM default (40); an explicit `AI_RPM_LIMIT` opts any
+ *   provider back in.
+ * - `rpm: null` — no window enforcement at all (the default for OpenAI,
+ *   Anthropic, DeepSeek and Gemini). Only the concurrency lanes below apply.
  * - Background generation is held below `rpm - reserve`, so a student opening
  *   the tutor or submitting an assignment always has requests left over.
  * - Each lane has its own in-flight cap: up to `backgroundConcurrency` builds
@@ -31,18 +34,19 @@ export class AiRateLimiter {
   /**
    * Effective ceiling in requests per minute. Starts at `rpm` and is cut when
    * the provider answers 429 — the account's real limit may be lower than the
-   * configured one — then earned back one per quiet minute.
+   * configured one — then earned back one per quiet minute. `Infinity` when
+   * there is no window (`rpm === null`), so every window check passes.
    */
   private allowance: number;
   private lastShrinkAt = 0;
 
   constructor(
-    readonly rpm: number,
+    readonly rpm: number | null,
     readonly concurrency: number,
     readonly reserve: number,
     readonly backgroundConcurrency: number,
   ) {
-    this.allowance = rpm;
+    this.allowance = rpm ?? Number.POSITIVE_INFINITY;
   }
 
   private prune(now: number): void {
@@ -56,7 +60,7 @@ export class AiRateLimiter {
     }
 
     // A rate limit costs allowance; a quiet minute earns one request back.
-    if (this.allowance < this.rpm && now - this.lastShrinkAt >= 60_000) {
+    if (this.rpm !== null && this.allowance < this.rpm && now - this.lastShrinkAt >= 60_000) {
       this.allowance = Math.min(this.rpm, this.allowance + 1);
       this.lastShrinkAt = now;
     }
@@ -150,15 +154,29 @@ export class AiRateLimiter {
   }
 }
 
-const globalForLimiter = globalThis as unknown as { __freedemyLimiter?: AiRateLimiter };
+const globalForLimiter = globalThis as unknown as {
+  __freedemyLimiters?: Map<string, AiRateLimiter>;
+};
+const limiters = globalForLimiter.__freedemyLimiters ?? new Map<string, AiRateLimiter>();
+globalForLimiter.__freedemyLimiters = limiters;
 
-export const aiLimiter =
-  globalForLimiter.__freedemyLimiter ??
-  new AiRateLimiter(
-    AI_RPM_LIMIT,
+/**
+ * The limiter for one provider's account. Rate limits belong to the vendor
+ * account making the request: a student on OpenAI (no window) must not inherit
+ * NIM's 40 RPM ceiling because another student chose NIM, and NIM's 429
+ * cooldown must only pause NIM's lanes. Keyed by provider id — `rpm` is fixed
+ * per process (`AI_RPM_LIMIT` comes from the environment), so the first
+ * construction wins.
+ */
+export function aiLimiterFor(provider: { id: string; rpm: number | null }): AiRateLimiter {
+  const existing = limiters.get(provider.id);
+  if (existing) return existing;
+  const limiter = new AiRateLimiter(
+    provider.rpm,
     AI_CONCURRENCY,
     AI_INTERACTIVE_RESERVE,
     AI_BACKGROUND_CONCURRENCY,
   );
-
-globalForLimiter.__freedemyLimiter = aiLimiter;
+  limiters.set(provider.id, limiter);
+  return limiter;
+}

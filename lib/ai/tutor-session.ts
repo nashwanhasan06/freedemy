@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "@/lib/storage";
 
 import { nimJson } from "@/lib/ai/nim";
 import { tutorCompactionSystem, tutorCompactionUser } from "@/lib/ai/prompts";
@@ -71,10 +71,10 @@ function isMissingTable(error: { code?: string; message?: string } | null): bool
  * budget, so a normal session costs no extra model call.
  */
 export async function loadTutorThread(
-  supabase: SupabaseClient,
+  db: DbClient,
   params: { userId: string; lessonId: string; courseId: string; lessonTitle: string },
 ): Promise<TutorThread> {
-  const { data: summaryData, error: summaryError } = await supabase
+  const { data: summaryData, error: summaryError } = await db
     .from("tutor_summaries")
     .select("summary,covered_until")
     .eq("user_id", params.userId)
@@ -86,7 +86,7 @@ export async function loadTutorThread(
   const summarised = isMissingTable(summaryError) ? null : (summaryData as SummaryRow | null);
   const summary = summarised?.summary ?? null;
 
-  let query = supabase
+  let query = db
     .from("tutor_messages")
     .select("role,content,created_at")
     .eq("user_id", params.userId)
@@ -120,13 +120,13 @@ export async function loadTutorThread(
     return { summary, recent };
   }
 
-  const folded = await compact(supabase, params, { summary, foldable });
+  const folded = await compact(db, params, { summary, foldable });
   // A failed fold is not a failed answer: the recent window still goes through.
   return folded ? { summary: folded, recent } : { summary, recent };
 }
 
 async function compact(
-  supabase: SupabaseClient,
+  db: DbClient,
   params: { userId: string; lessonId: string; courseId: string; lessonTitle: string },
   thread: { summary: string | null; foldable: TurnRow[] },
 ): Promise<string | null> {
@@ -147,7 +147,7 @@ async function compact(
       },
     });
 
-    const { error } = await supabase.from("tutor_summaries").upsert(
+    const { error } = await db.from("tutor_summaries").upsert(
       {
         user_id: params.userId,
         lesson_id: params.lessonId,
